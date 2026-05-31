@@ -1003,6 +1003,7 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
   const _host = (hostOverride !== undefined) ? (hostOverride || '') : (_envState.remoteHost || '');
   const _hsrv = _envState.servers.find(s => s.host === _host) || {};
   const _hplatform = _host ? (_hsrv.platform || '') : (_envState.platform || '');
+  const _isAppleTarget = ['macos', 'darwin', 'mac'].includes(String(_hplatform || '').toLowerCase());
 
   // Replace any serve already targeting this same host:port — you can't run two
   // servers on one port, so re-serving (or retrying) should stop & remove the
@@ -1036,7 +1037,7 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
   // working config fails: no venv activation, no GPU pinning).
   const _usedEnv = _envState.env;
   const _usedEnvPath = _envState.envPath;
-  const _usedGpus = _envState.gpus || '';
+  const _usedGpus = _isAppleTarget ? '' : (_envState.gpus || '');
   let envPrefix = '';
   if (_isWindows()) {
     if (_envState.env === 'venv' && _envState.envPath) {
@@ -1060,7 +1061,7 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
     ssh_port: _getPort(_host) || undefined,
     env_prefix: envPrefix || undefined,
     hf_token: _envState.hfToken || undefined,
-    gpus: _envState.gpus || undefined,
+    gpus: (!_isAppleTarget && _envState.gpus) || undefined,
     platform: _hplatform || undefined,
   };
 

@@ -8,7 +8,7 @@ CACHE_TTL = 1800  # 30 min — hardware rarely changes; use the Rescan button to
 
 _remote_host = None  # set by detect_system(host=...)
 _remote_port = None  # set by detect_system(ssh_port=...)
-_remote_platform = None  # set by detect_system(platform=...): "windows", "linux", "termux"
+_remote_platform = None  # set by detect_system(platform=...): "windows", "linux", "macos", "termux"
 _last_gpu_error = None  # set by _detect_nvidia() when nvidia-smi errors (driver mismatch, etc.)
 
 
@@ -35,6 +35,39 @@ def _run(cmd):
     except Exception:
         pass
     return None
+
+
+def _sysctl(name):
+    """Read a local macOS sysctl value."""
+    if _remote_host:
+        return None
+    return _run(["sysctl", "-n", name])
+
+
+def _is_remote_macos():
+    return bool(_remote_host) and str(_remote_platform or "").lower() in {"macos", "darwin", "mac"}
+
+
+def _parse_vm_stat_available_gb(out):
+    """Parse macOS vm_stat free-ish pages into GiB."""
+    page_size = 4096
+    pages = 0
+    if not out:
+        return 0.0
+    for line in out.splitlines():
+        if "page size of" in line:
+            try:
+                page_size = int(line.split("page size of", 1)[1].split("bytes", 1)[0].strip())
+            except Exception:
+                pass
+        key = line.split(":", 1)[0].strip().lower()
+        if key in {"pages free", "pages inactive", "pages speculative"} and ":" in line:
+            raw = line.split(":", 1)[1].strip().rstrip(".")
+            try:
+                pages += int(raw)
+            except ValueError:
+                pass
+    return (pages * page_size) / (1024**3) if pages else 0.0
 
 
 def _group_gpus(gpus):
@@ -204,6 +237,43 @@ def _detect_amd():
         return None
 
 
+def _detect_apple_silicon(total_ram_gb=0.0):
+    """Detect Apple Silicon as a Metal/unified-memory GPU.
+
+    macOS has no /proc or /sys GPU inventory like Linux. For M-series Macs,
+    CPU/GPU share unified memory; use a conservative 75% of system RAM as the
+    fit budget so Cookbook can surface MLX/GGUF options without pretending the
+    whole machine is dedicated VRAM.
+    """
+    if _remote_host or platform.system() != "Darwin":
+        return None
+    machine = (platform.machine() or "").lower()
+    brand = (_sysctl("machdep.cpu.brand_string") or "").strip()
+    if machine not in ("arm64", "aarch64") and "apple" not in brand.lower():
+        return None
+
+    total = total_ram_gb or _get_ram_gb()
+    unified_budget = round(max(total * 0.75, 1.0), 1) if total else 0.0
+    name = brand or "Apple Silicon"
+    gpu_name = f"{name} GPU"
+    return {
+        "gpu_name": gpu_name,
+        "gpu_vram_gb": unified_budget,
+        "gpu_count": 1,
+        "gpus": [{"index": 0, "name": gpu_name, "vram_gb": unified_budget}],
+        "gpu_groups": [{
+            "name": gpu_name,
+            "vram_each": unified_budget,
+            "count": 1,
+            "indices": [0],
+            "vram_total": unified_budget,
+        }],
+        "homogeneous": True,
+        "backend": "metal",
+        "unified_memory": True,
+    }
+
+
 def _read_file(path):
     """Read a file, locally or via SSH."""
     if _remote_host:
@@ -234,6 +304,13 @@ def _parse_meminfo():
 
 
 def _get_ram_gb():
+    if not _remote_host and platform.system() == "Darwin":
+        out = _sysctl("hw.memsize")
+        if out:
+            try:
+                return int(out.strip()) / (1024**3)
+            except ValueError:
+                pass
     meminfo = _parse_meminfo()
     if "MemTotal" in meminfo:
         return meminfo["MemTotal"] / (1024**2)
@@ -250,6 +327,11 @@ def _get_ram_gb():
 
 
 def _get_available_ram_gb():
+    if not _remote_host and platform.system() == "Darwin":
+        out = _run(["vm_stat"])
+        available = _parse_vm_stat_available_gb(out)
+        if available:
+            return available
     meminfo = _parse_meminfo()
     if "MemAvailable" in meminfo:
         return meminfo["MemAvailable"] / (1024**2)
@@ -257,6 +339,8 @@ def _get_available_ram_gb():
 
 
 def _get_cpu_name():
+    if not _remote_host and platform.system() == "Darwin":
+        return _sysctl("machdep.cpu.brand_string") or platform.processor() or "unknown"
     text = _read_file("/proc/cpuinfo")
     if text:
         for line in text.split("\n"):
@@ -360,6 +444,73 @@ def _detect_windows():
         return None
 
 
+def _detect_macos():
+    """Detect remote macOS hardware via sysctl/vm_stat over SSH."""
+    total_out = _run("sysctl -n hw.memsize 2>/dev/null")
+    if not total_out:
+        return None
+    try:
+        total_ram = round(int(total_out.strip()) / (1024**3), 1)
+    except ValueError:
+        return None
+
+    available_ram = round(
+        _parse_vm_stat_available_gb(_run("vm_stat 2>/dev/null")) or (total_ram * 0.7),
+        1,
+    )
+    try:
+        cpu_cores = int((_run("sysctl -n hw.logicalcpu 2>/dev/null") or "1").strip())
+    except ValueError:
+        cpu_cores = 1
+    cpu_name = (
+        _run("sysctl -n machdep.cpu.brand_string 2>/dev/null")
+        or _run("sysctl -n hw.model 2>/dev/null")
+        or "unknown"
+    )
+    machine = (_run("uname -m 2>/dev/null") or "").strip().lower()
+    is_apple = machine in {"arm64", "aarch64"} or "apple" in cpu_name.lower()
+
+    if is_apple:
+        unified_budget = round(max(total_ram * 0.75, 1.0), 1)
+        gpu_name = f"{cpu_name or 'Apple Silicon'} GPU"
+        return {
+            "total_ram_gb": total_ram,
+            "available_ram_gb": available_ram,
+            "cpu_cores": cpu_cores,
+            "cpu_name": cpu_name,
+            "has_gpu": True,
+            "gpu_name": gpu_name,
+            "gpu_vram_gb": unified_budget,
+            "gpu_count": 1,
+            "gpus": [{"index": 0, "name": gpu_name, "vram_gb": unified_budget}],
+            "gpu_groups": [{
+                "name": gpu_name,
+                "vram_each": unified_budget,
+                "count": 1,
+                "indices": [0],
+                "vram_total": unified_budget,
+            }],
+            "homogeneous": True,
+            "backend": "metal",
+            "unified_memory": True,
+        }
+
+    return {
+        "total_ram_gb": total_ram,
+        "available_ram_gb": available_ram,
+        "cpu_cores": cpu_cores,
+        "cpu_name": cpu_name,
+        "has_gpu": False,
+        "gpu_name": None,
+        "gpu_vram_gb": None,
+        "gpu_count": 0,
+        "gpus": [],
+        "gpu_groups": [],
+        "homogeneous": True,
+        "backend": "cpu_arm" if "arm" in machine or "aarch64" in machine else "cpu_x86",
+    }
+
+
 _cache_by_host = {}  # host -> (timestamp, result)
 
 
@@ -368,7 +519,7 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
     changes, and probing a remote host over SSH is slow). Pass fresh=True to
     bypass the cache and re-probe (the "Rescan" button).
     If host is set (e.g. 'user@server'), runs detection commands over SSH.
-    platform: "windows", "linux", "termux", or "" (auto-detect).
+    platform: "windows", "linux", "macos", "termux", or "" (auto-detect).
     """
     global _remote_host, _remote_port, _remote_platform
 
@@ -398,7 +549,21 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
         _cache_by_host[cache_key] = (now, result)
         return result
 
-    # Linux/Termux: existing multi-command detection
+    if _is_remote_macos():
+        result = _detect_macos()
+        if result:
+            _remote_host = None
+            _remote_platform = None
+            _cache_by_host[cache_key] = (now, result)
+            return result
+        result = {"error": f"Cannot connect to {host}", "host": host}
+        _remote_host = None
+        _remote_platform = None
+        _cache_by_host[cache_key] = (now, result)
+        return result
+
+    # Local macOS plus Linux/Termux: multi-command detection with platform
+    # fallbacks. Remote hosts remain Linux/Termux unless platform=windows.
     total_ram = round(_get_ram_gb(), 1)
     # If remote host returns 0 RAM, connection likely failed
     if _remote_host and total_ram <= 0:
@@ -411,7 +576,7 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
     cpu_cores = _get_cpu_count()
     cpu_name = _get_cpu_name()
 
-    gpu_info = _detect_nvidia() or _detect_amd()
+    gpu_info = _detect_nvidia() or _detect_amd() or _detect_apple_silicon(total_ram)
 
     if gpu_info:
         result = {

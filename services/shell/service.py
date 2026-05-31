@@ -4,6 +4,8 @@
 from dataclasses import dataclass
 from typing import Optional, AsyncIterator
 import asyncio
+import os
+import shutil
 from pathlib import Path
 
 
@@ -53,12 +55,20 @@ class ShellService:
 
         proc = None
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-            )
+            if os.name == "nt":
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    shutil.which("bash") or "/bin/bash", "-lc", command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                )
             stdout_b, stderr_b = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
             )
@@ -101,12 +111,20 @@ class ShellService:
         proc = None
         reader_tasks = []
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self.cwd,
-            )
+            if os.name == "nt":
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=self.cwd,
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    shutil.which("bash") or "/bin/bash", "-lc", command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=self.cwd,
+                )
 
             q: asyncio.Queue = asyncio.Queue()
 

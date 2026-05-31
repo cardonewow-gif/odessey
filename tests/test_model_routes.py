@@ -6,6 +6,11 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+for _name in ("routes.model_routes", "src.endpoint_resolver"):
+    _mod = sys.modules.get(_name)
+    if isinstance(_mod, MagicMock) or isinstance(getattr(_mod, "_anthropic_api_root", None), MagicMock):
+        sys.modules.pop(_name, None)
+
 if "core.database" not in sys.modules:
     _core_db = types.ModuleType("core.database")
     for _name in [

@@ -23,6 +23,8 @@ def _find_npx() -> str:
     for candidate in [
         os.path.expanduser("~/.npm-global/bin/npx"),
         os.path.expanduser("~/.local/bin/npx"),
+        "/opt/homebrew/bin/npx",
+        "/opt/local/bin/npx",
         "/usr/local/bin/npx",
         "/usr/bin/npx",
     ]:

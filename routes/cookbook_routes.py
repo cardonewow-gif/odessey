@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import platform as py_platform
 import re
 import shlex
 import shutil
@@ -285,7 +286,14 @@ def setup_cookbook_routes() -> APIRouter:
         if windows:
             check = f"powershell -NoProfile -Command \"if (Get-Command {binary} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 127 }}\""
         else:
-            check = f"command -v {shlex.quote(binary)} >/dev/null 2>&1"
+            login_check = f"command -v {shlex.quote(binary)} >/dev/null 2>&1"
+            inner = (
+                'export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:'
+                '/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"; '
+                f"{login_check} || "
+                f'{{ [ -n "$SHELL" ] && "$SHELL" -lc {shlex.quote(login_check)}; }}'
+            )
+            check = f"sh -lc {shlex.quote(inner)}"
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ssh", "-o", "ConnectTimeout=6", "-o", "StrictHostKeyChecking=no",
@@ -441,7 +449,7 @@ def setup_cookbook_routes() -> APIRouter:
             else:
                 # Fallback: find a venv with hf CLI, or install huggingface-hub
                 runner_lines.append(
-                    'for p in ~/vllm-env ~/venv ~/.venv; do '
+                    'for p in ~/vllm-env ~/venv ~/.venv ~/.odysseus-cookbook-venv; do '
                     'if [ -f "$p/bin/activate" ]; then source "$p/bin/activate"; break; fi; '
                     'done'
                 )
@@ -768,6 +776,10 @@ def setup_cookbook_routes() -> APIRouter:
         session_id = f"serve-{uuid.uuid4().hex[:8]}"
         remote = req.remote_host
         is_windows = req.platform == "windows"
+        req_platform = (req.platform or "").lower()
+        is_macos = req_platform in {"macos", "darwin", "mac"} or (
+            not remote and py_platform.system() == "Darwin"
+        )
 
         if not is_windows and not await _binary_available("tmux", remote, req.ssh_port):
             return {
@@ -832,13 +844,13 @@ def setup_cookbook_routes() -> APIRouter:
                 f'ssh {_pf}{remote} "powershell -Command \\"{launch_ps}\\""'
             )
         else:
-            # ── Linux/Termux: bash + tmux (existing flow) ──
+            # ── POSIX local/remote: bash + tmux (Linux, Termux, macOS) ──
             runner_lines = ["#!/bin/bash"]
             runner_lines.extend(_user_shell_path_bootstrap())
             runner_lines.append("export FLASHINFER_DISABLE_VERSION_CHECK=1")
             if req.hf_token:
                 runner_lines.append(f"export HF_TOKEN='{_bash_squote(req.hf_token)}'")
-            if req.gpus:
+            if req.gpus and not is_macos:
                 runner_lines.append(f"export CUDA_VISIBLE_DEVICES='{req.gpus}'")
             if req.env_prefix:
                 runner_lines.append(_safe_env_prefix(req.env_prefix))
@@ -866,9 +878,15 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('  echo "Native llama-server not found — building from source (one-time, may take a few minutes)..."')
                 runner_lines.append('  mkdir -p ~/bin')
                 runner_lines.append('  cd ~ && [ -d llama.cpp ] || git clone --depth 1 https://github.com/ggml-org/llama.cpp')
-                # GPU build if CUDA is present; fall back to a plain (CPU) build.
-                runner_lines.append('  cd ~/llama.cpp && { cmake -B build -DGGML_CUDA=ON 2>/dev/null || cmake -B build; } \\')
-                runner_lines.append('    && cmake --build build -j"$(nproc)" --target llama-server \\')
+                runner_lines.append('  BUILD_JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"')
+                runner_lines.append('  BUILD_JOBS="${BUILD_JOBS%%[!0-9]*}"')
+                runner_lines.append('  [ -n "$BUILD_JOBS" ] || BUILD_JOBS=4')
+                # GPU build if the host supports it; fall back to a plain build.
+                if is_macos:
+                    runner_lines.append('  cd ~/llama.cpp && { cmake -B build -DGGML_METAL=ON 2>/dev/null || cmake -B build; } \\')
+                else:
+                    runner_lines.append('  cd ~/llama.cpp && { cmake -B build -DGGML_CUDA=ON 2>/dev/null || cmake -B build; } \\')
+                runner_lines.append('    && cmake --build build -j"$BUILD_JOBS" --target llama-server \\')
                 runner_lines.append('    && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
                 runner_lines.append('  # If the native build failed, fall back to the Python bindings.')
                 runner_lines.append('  if ! command -v llama-server &>/dev/null && ! python3 -c "import llama_cpp" 2>/dev/null; then')
@@ -977,7 +995,8 @@ def setup_cookbook_routes() -> APIRouter:
             raise HTTPException(400, "Invalid ssh_port")
         pf = f"-p {port} " if port and port != "22" else ""
 
-        # Detect platform: Windows first (echo %OS% → Windows_NT), then Termux, then Linux
+        # Detect platform: Windows first (echo %OS% → Windows_NT), then
+        # Termux/macOS/Linux via POSIX shell.
         detect_cmd = f'ssh {pf}{host} "echo %OS%"'
         platform = "linux"
         try:
@@ -989,8 +1008,12 @@ def setup_cookbook_routes() -> APIRouter:
             if "Windows_NT" in out:
                 platform = "windows"
             else:
-                # Check for Termux
-                detect_cmd2 = f"ssh {pf}{host} 'test -d /data/data/com.termux && echo termux || echo linux'"
+                detect_cmd2 = (
+                    f"ssh {pf}{host} "
+                    "'if test -d /data/data/com.termux; then echo termux; "
+                    "elif [ \"$(uname -s 2>/dev/null)\" = Darwin ]; then echo macos; "
+                    "else echo linux; fi'"
+                )
                 proc2 = await asyncio.create_subprocess_shell(
                     detect_cmd2, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
@@ -1018,7 +1041,22 @@ def setup_cookbook_routes() -> APIRouter:
                 "pip install -q filelock fsspec packaging pyyaml tqdm typer httpx requests 2>/dev/null; "
                 "python3 -c 'from huggingface_hub import snapshot_download; print(\"OK\")'"
             )
-            cmd = f"ssh {pf}{host} '{setup_script}'"
+            cmd = f"ssh {pf}{host} {shlex.quote(setup_script)}"
+        elif platform == "macos":
+            setup_script = (
+                "export PATH=\"$HOME/.local/bin:$HOME/.odysseus-cookbook-venv/bin:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; "
+                "if ! command -v tmux >/dev/null 2>&1; then "
+                "  if command -v brew >/dev/null 2>&1; then brew install tmux; "
+                "  else echo 'WARNING: tmux missing and Homebrew not found. Install Homebrew or tmux manually.'; fi; "
+                "fi; "
+                "command -v tmux >/dev/null 2>&1 || echo 'WARNING: tmux missing and auto-install failed.'; "
+                "python3 -c 'import huggingface_hub' 2>/dev/null || "
+                "python3 -m pip install -q --user --break-system-packages huggingface_hub hf_transfer 2>/dev/null || "
+                "(python3 -m venv \"$HOME/.odysseus-cookbook-venv\" && \"$HOME/.odysseus-cookbook-venv/bin/python\" -m pip install -q huggingface_hub hf_transfer); "
+                "(python3 -c 'from huggingface_hub import snapshot_download; print(\"OK\")' 2>/dev/null || "
+                "\"$HOME/.odysseus-cookbook-venv/bin/python\" -c 'from huggingface_hub import snapshot_download; print(\"OK\")')"
+            )
+            cmd = f"ssh {pf}{host} {shlex.quote(setup_script)}"
         else:
             # Linux: auto-install tmux (via whichever package manager is available)
             # and huggingface_hub + hf_transfer (falling back to --user/--break-system-packages
@@ -1040,7 +1078,7 @@ def setup_cookbook_routes() -> APIRouter:
                 "pip3 install --user --break-system-packages -q huggingface_hub hf_transfer 2>/dev/null; "
                 "python3 -c 'from huggingface_hub import snapshot_download; print(\"OK\")'"
             )
-            cmd = f"ssh {pf}{host} '{setup_script}'"
+            cmd = f"ssh {pf}{host} {shlex.quote(setup_script)}"
 
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -1191,6 +1229,39 @@ def setup_cookbook_routes() -> APIRouter:
                 gpus[0]["busy"] = True
         return gpus
 
+    async def _probe_macos_metal(host: str | None, ssh_port: str | None) -> list[dict]:
+        out, err = await _run_gpu_shell(
+            "uname -s 2>/dev/null; sysctl -n hw.memsize 2>/dev/null; sysctl -n machdep.cpu.brand_string 2>/dev/null || true",
+            host, ssh_port, timeout=5,
+        )
+        if err is not None or not out:
+            return []
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        if not lines or lines[0] != "Darwin":
+            return []
+        total_bytes = 0
+        if len(lines) > 1:
+            try:
+                total_bytes = int(lines[1])
+            except ValueError:
+                total_bytes = 0
+        total_mb = int((total_bytes * 0.75) / (1024 * 1024)) if total_bytes else 0
+        name = lines[2] if len(lines) > 2 else "Apple Silicon"
+        return [{
+            "index": 0,
+            "name": f"{name} GPU",
+            "uuid": "metal-unified-memory",
+            "free_mb": total_mb,
+            "total_mb": total_mb,
+            "used_mb": 0,
+            "util_pct": 0,
+            "busy": False,
+            "processes": [],
+            "backend": "metal",
+            "source": "macos-sysctl",
+            "unified_memory": True,
+        }]
+
     @router.get("/api/cookbook/gpus")
     async def list_gpus(request: Request, host: str | None = None, ssh_port: str | None = None):
         """Probe GPU memory/process state locally or via SSH.
@@ -1288,6 +1359,17 @@ def setup_cookbook_routes() -> APIRouter:
                 "gpus": amd_gpus,
                 "backend": "rocm",
                 "source": "amd-sysfs",
+                "fallback_from": "nvidia-smi",
+                "nvidia_error": nvidia_error,
+            }
+
+        metal_gpus = await _probe_macos_metal(host, ssh_port)
+        if metal_gpus:
+            return {
+                "ok": True,
+                "gpus": metal_gpus,
+                "backend": "metal",
+                "source": "macos-sysctl",
                 "fallback_from": "nvidia-smi",
                 "nvidia_error": nvidia_error,
             }

@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional existing tag to publish, for example v1.0.0"
+        required: false
+      publish:
+        description: "Publish the GitHub release and GHCR image"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  RELEASE_REF: ${{ inputs.tag || github.ref }}
+  PUBLISH_RELEASE: ${{ github.event_name == 'push' || inputs.publish }}
+
+jobs:
+  test:
+    name: Release Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          npm ci
+      - name: Initialize and test
+        env:
+          ODYSSEUS_ADMIN_PASSWORD: ci-admin-password
+        run: |
+          python setup.py
+          python -m pytest -q
+          cp .env.example .env
+          docker compose config --quiet
+
+  source-archive:
+    name: Source Archive
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
+
+      - name: Build source archive
+        run: |
+          mkdir -p dist
+          git archive \
+            --format=tar.gz \
+            --prefix="odysseus-${RELEASE_TAG}/" \
+            -o "dist/odysseus-${RELEASE_TAG}.tar.gz" \
+            HEAD
+          (cd dist && sha256sum *.tar.gz > checksums.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: odysseus-source
+          path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+
+      - name: Publish GitHub release
+        if: startsWith(env.RELEASE_TAG, 'v') && env.PUBLISH_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/*.tar.gz dist/checksums.txt --generate-notes \
+            || gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/checksums.txt --clobber
+
+  docker-image:
+    name: Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: env.PUBLISH_RELEASE == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=tag,enable=${{ startsWith(env.RELEASE_TAG, 'v') }}
+            type=raw,value=${{ env.RELEASE_TAG }},enable=${{ startsWith(env.RELEASE_TAG, 'v') }}
+            type=raw,value=latest,enable=${{ startsWith(env.RELEASE_TAG, 'v') && env.PUBLISH_RELEASE == 'true' }}
+            type=raw,value=release-dry-run,enable=${{ !startsWith(env.RELEASE_TAG, 'v') }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ env.PUBLISH_RELEASE == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

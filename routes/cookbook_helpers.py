@@ -199,7 +199,7 @@ class ModelDownloadRequest(BaseModel):
     env_prefix: str | None = None  # e.g. "source ~/venv/bin/activate"
     remote_host: str | None = None  # e.g. "gpu-box" — run download on this host via SSH
     ssh_port: str | None = None    # e.g. "8022" for Termux
-    platform: str | None = None    # "linux", "termux", or "windows"
+    platform: str | None = None    # "linux", "termux", "macos", or "windows"
     local_dir: str | None = None   # base dir to download into (a per-model subfolder is created under it); None = default HF cache
     disable_hf_transfer: bool = False  # skip the Rust hf_transfer downloader — slower but far more reliable on large files (used by retries)
 
@@ -212,7 +212,7 @@ class ServeRequest(BaseModel):
     env_prefix: str | None = None
     hf_token: str | None = None
     gpus: str | None = None
-    platform: str | None = None    # "linux", "termux", or "windows"
+    platform: str | None = None    # "linux", "termux", "macos", or "windows"
 
 
 def _parse_serve_phase(snapshot: str, task_type: str = "serve") -> dict:

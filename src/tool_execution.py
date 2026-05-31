@@ -12,6 +12,7 @@ import collections
 import json
 import logging
 import os
+import shutil
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
@@ -323,12 +324,21 @@ async def _direct_fallback(
 
     try:
         if tool == "bash":
-            proc = await asyncio.create_subprocess_shell(
-                content,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=_subproc_env,
-            )
+            if os.name == "nt":
+                proc = await asyncio.create_subprocess_shell(
+                    content,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=_subproc_env,
+                )
+            else:
+                bash = shutil.which("bash") or "/bin/bash"
+                proc = await asyncio.create_subprocess_exec(
+                    bash, "-lc", content,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=_subproc_env,
+                )
             stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
                 proc,
                 timeout=DEFAULT_BASH_TIMEOUT,

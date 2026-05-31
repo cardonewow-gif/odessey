@@ -2796,16 +2796,63 @@ def _cookbook_apply_retry_suggestion(cmd: str, suggestion: Dict[str, Any]) -> st
 
 
 def _scan_running_model_processes() -> List[Dict[str, Any]]:
-    """Scan /proc for running model server processes. Linux-only; returns
-    [] on other platforms or if /proc isn't accessible. Each match returns
-    a dict shaped like a cookbook task so the caller can merge cleanly.
+    """Scan local process table for running model servers.
+
+    Linux uses /proc cmdline for exact args. macOS/BSD falls back to
+    `ps -axo pid=,command=` so Ollama/llama-server/vLLM launched outside
+    Cookbook still show up.
     """
     import os
-    if not os.path.isdir("/proc"):
-        return []
+    import subprocess
     out: List[Dict[str, Any]] = []
     seen_keys = set()
+
+    def _add_match(pid: int, cmdline: str):
+        lower = cmdline.lower()
+        for label, needles in _MODEL_PROCESS_PATTERNS:
+            if any(n.lower() in lower for n in needles):
+                key = (label, cmdline.split(" ")[0])
+                if key in seen_keys:
+                    return
+                seen_keys.add(key)
+                model = ""
+                for tok in cmdline.split():
+                    if "/" in tok and any(s in tok.lower() for s in (
+                        "model", "checkpoint", ".safetensors", ".gguf", ".bin", "huggingface"
+                    )):
+                        model = tok
+                        break
+                out.append({
+                    "session_id": f"pid-{pid}",
+                    "model": model or label,
+                    "phase": "running (external)",
+                    "type": "serve",
+                    "remote": "local",
+                    "pid": pid,
+                    "label": label,
+                    "cmdline_preview": cmdline[:140] + ("…" if len(cmdline) > 140 else ""),
+                    "external": True,
+                })
+                return
+
     try:
+        if not os.path.isdir("/proc"):
+            ps = subprocess.run(
+                ["ps", "-axo", "pid=,command="],
+                capture_output=True, text=True, timeout=5,
+            )
+            if ps.returncode != 0:
+                return []
+            for line in ps.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                pid_s, _, cmdline = line.partition(" ")
+                if not pid_s.isdigit() or not cmdline.strip():
+                    continue
+                _add_match(int(pid_s), cmdline.strip())
+            return out
+
         for pid_dir in os.listdir("/proc"):
             if not pid_dir.isdigit():
                 continue
@@ -2820,35 +2867,7 @@ def _scan_running_model_processes() -> List[Dict[str, Any]]:
             cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
             if not cmdline:
                 continue
-            lower = cmdline.lower()
-            for label, needles in _MODEL_PROCESS_PATTERNS:
-                if any(n.lower() in lower for n in needles):
-                    # Dedupe by (label, first-arg) — multi-worker servers
-                    # spawn N processes; only show one row per server.
-                    key = (label, cmdline.split(" ")[0])
-                    if key in seen_keys:
-                        break
-                    seen_keys.add(key)
-                    # Try to pluck a model name out of the cmdline.
-                    model = ""
-                    for tok in cmdline.split():
-                        if "/" in tok and any(s in tok.lower() for s in (
-                            "model", "checkpoint", ".safetensors", ".gguf", ".bin", "huggingface"
-                        )):
-                            model = tok
-                            break
-                    out.append({
-                        "session_id": f"pid-{pid_dir}",
-                        "model": model or label,
-                        "phase": "running (external)",
-                        "type": "serve",
-                        "remote": "local",
-                        "pid": int(pid_dir),
-                        "label": label,
-                        "cmdline_preview": cmdline[:140] + ("…" if len(cmdline) > 140 else ""),
-                        "external": True,
-                    })
-                    break
+            _add_match(int(pid_dir), cmdline)
     except Exception as e:
         logger.debug(f"_scan_running_model_processes failed: {e}")
     return out

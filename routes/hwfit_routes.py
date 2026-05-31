@@ -55,7 +55,7 @@ def setup_hwfit_routes():
         count = max(1, min(count, 16))
         vram_each = max(1.0, vram_each)
         backend = (manual_backend or system.get("backend") or "cuda").lower()
-        if backend not in {"cuda", "rocm", "cpu_x86", "cpu_arm"}:
+        if backend not in {"cuda", "rocm", "metal", "mps", "apple", "cpu_x86", "cpu_arm"}:
             backend = "cuda"
         total_vram = round(vram_each * count, 1)
         gpu_name = f"Simulated {backend.upper()} GPU" + (f" × {count}" if count > 1 else "")

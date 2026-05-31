@@ -483,7 +483,7 @@ def setup_shell_routes() -> APIRouter:
         import importlib, shlex, json as _json
         packages = [
             # ── System ── OS binaries, not pip packages
-            {"name": "tmux", "pip": "", "desc": "Required for Linux/Termux Cookbook background downloads and serves", "category": "System", "target": "remote", "kind": "system", "install_hint": "Run Cookbook server setup, or install tmux with apt/pacman/dnf/apk/zypper."},
+            {"name": "tmux", "pip": "", "desc": "Required for Cookbook background downloads and serves", "category": "System", "target": "remote", "kind": "system", "install_hint": "Run Cookbook server setup, or install tmux with brew/apt/pacman/dnf/apk/zypper."},
             {"name": "docker", "pip": "", "desc": "Required only for Docker-backed launch commands", "category": "System", "target": "remote", "kind": "system", "install_hint": "Install Docker on the selected server and allow this user to run docker."},
             # ── LLM ── installs on GPU servers for model serving/downloading
             {"name": "hf_transfer", "pip": "hf_transfer", "desc": "Fast model downloads from HuggingFace", "category": "LLM", "target": "remote"},

@@ -768,7 +768,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "host": {"type": "string", "description": "Friendly Cookbook server name (e.g. 'ajax', 'gpu-box') or raw remote host (e.g. 'user@gpu-box'). Omit for local."},
                     "model_dir": {"type": "string", "description": "Comma-separated additional model directories to scan beyond ~/.cache/huggingface/hub"},
                     "ssh_port": {"type": "string", "description": "SSH port for remote host (default 22)"},
-                    "platform": {"type": "string", "enum": ["linux", "windows"], "description": "Remote platform"}
+                    "platform": {"type": "string", "enum": ["linux", "windows", "macos", "termux"], "description": "Remote platform"}
                 },
                 "required": []
             }

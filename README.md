@@ -61,8 +61,19 @@ After generating the key, you can also install it from the host with:
 ```bash
 ssh-copy-id -i data/ssh/id_ed25519.pub user@server
 ```
+On macOS, install `ssh-copy-id` with `brew install ssh-copy-id`, or append the
+key manually:
+```bash
+cat data/ssh/id_ed25519.pub | ssh user@server 'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys'
+```
 Cookbook local downloads are stored in `./data/huggingface`, mounted as
 `~/.cache/huggingface` inside the Odysseus container.
+
+On macOS Docker Desktop, set host ownership in `.env` so bind-mounted files stay
+editable from Finder/Terminal:
+```bash
+printf "PUID=%s\nPGID=%s\n" "$(id -u)" "$(id -g)" >> .env
+```
 
 Useful checks:
 ```bash
@@ -82,11 +93,14 @@ The Cookbook model catalog check should print a non-zero count. If it prints
 `0`, rebuild the Odysseus image with `docker compose build --no-cache odysseus`.
 
 ### Option 2: Manual install — Linux / macOS
-**Requirements:** Python 3.11+. On Linux/Termux, Cookbook also requires `tmux`
-for background model downloads and serves.
+**Requirements:** Python 3.11+. Cookbook also requires `tmux` for background
+model downloads and serves.
 
 Install system packages first:
 ```bash
+# macOS
+brew install tmux
+
 # Debian/Ubuntu
 sudo apt install tmux
 
@@ -107,6 +121,19 @@ pip install -r requirements.txt
 python setup.py            # creates data dirs and prints an initial admin password
 uvicorn app:app --host 0.0.0.0 --port 7000
 ```
+
+For manual installs that use vector memory without Compose, run ChromaDB
+separately:
+```bash
+docker run -d --name odysseus-chroma -p 8100:8000 chromadb/chroma:latest
+```
+
+To run Odysseus as a login service on macOS after setup:
+```bash
+./install-service.sh
+```
+This creates a LaunchAgent at `~/Library/LaunchAgents/com.odysseus.ui.plist`
+and starts Odysseus on `http://127.0.0.1:7000`.
 
 ### Option 3: Manual install — Windows (PowerShell)
 ```powershell

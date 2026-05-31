@@ -55,10 +55,12 @@ if (typeof window !== 'undefined' && !window._tagScrollGuardWired) {
 export const _MODELDIR_CHECK_OFF = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/></svg>';
 export const _MODELDIR_CHECK_ON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="8 12 11 15 16 9"/></svg>';
 
-// Monochrome platform glyphs (currentColor) for a server's OS tag: a penguin for
-// Linux, the four-pane logo for Windows, an Android robot for Termux/Android.
+// Monochrome platform glyphs (currentColor) for a server's OS tag.
 function _platformIcon(platform) {
   const k = (platform || '').toLowerCase();
+  if (k === 'macos' || k === 'darwin' || k === 'mac') {
+    return '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M16.5 3.2c-.8.1-1.8.6-2.4 1.4-.5.7-.9 1.7-.8 2.6.9.1 1.9-.5 2.5-1.2.6-.8 1-1.8.7-2.8zM20.3 17.4c-.4.9-.6 1.3-1.1 2.1-.7 1-1.6 2.2-2.8 2.2-1 0-1.3-.7-2.8-.7s-1.8.7-2.9.7c-1.2 0-2.1-1.1-2.8-2.1-1.9-2.7-2.1-5.9-.9-7.6.9-1.2 2.2-1.9 3.5-1.9 1.4 0 2.2.7 3.3.7 1.1 0 1.8-.7 3.4-.7 1.2 0 2.5.7 3.4 1.8-3 1.6-2.5 5.8-.3 6.5z"/></svg>';
+  }
   if (k === 'windows') {
     return '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M3 4.6l8-1.2v8.1H3V4.6zm9-1.3L21 2v9.5h-9V3.3zM3 12.5h8v8.1l-8-1.2v-6.9zm9 0h9V22l-9-1.3v-8.2z"/></svg>';
   }
@@ -158,7 +160,7 @@ function _getPort(hostOrTask) {
   return srv?.port || '';
 }
 
-/** Get platform for a given host (or task object). Returns 'windows', 'termux', 'linux', or '' */
+/** Get platform for a given host (or task object). Returns 'windows', 'termux', 'macos', 'linux', or '' */
 export function _getPlatform(hostOrTask) {
   if (!hostOrTask) return _envState.platform || '';
   if (typeof hostOrTask === 'object') return hostOrTask.platform || _getPlatform(hostOrTask.remoteHost);
@@ -169,6 +171,11 @@ export function _getPlatform(hostOrTask) {
 /** Check if the current active server is Windows */
 export function _isWindows(hostOrTask) {
   return _getPlatform(hostOrTask) === 'windows';
+}
+
+/** Check if the current active server is macOS/Apple Silicon */
+export function _isApplePlatform(hostOrTask) {
+  return ['macos', 'darwin', 'mac'].includes(String(_getPlatform(hostOrTask) || '').toLowerCase());
 }
 
 /** Detect model-specific vLLM optimizations */
@@ -241,6 +248,7 @@ export function _detectBackend(model) {
   const q = (model.quant || '').toUpperCase();
   const sysBackend = String(_hwfitCache?.system?.backend || '').toLowerCase();
   const isRocm = sysBackend === 'rocm';
+  const isApple = _isApplePlatform() || ['metal', 'mps', 'apple'].includes(sysBackend);
 
   // Image gen models → diffusers
   if (model.is_image_gen || model.is_diffusion || model._tag === 'image') {
@@ -249,6 +257,12 @@ export function _detectBackend(model) {
 
   // Windows → default to llama.cpp (no vLLM support on Windows)
   if (_isWindows()) {
+    return { backend: 'llamacpp', label: 'llama.cpp' };
+  }
+
+  // macOS/Apple Silicon → llama.cpp/Metal by default. vLLM CUDA flags are
+  // wrong here, and GGUF/MLX-filtered recommendations are Apple-oriented.
+  if (isApple) {
     return { backend: 'llamacpp', label: 'llama.cpp' };
   }
 
@@ -298,7 +312,7 @@ export function _buildEnvPrefix() {
   }
   let envVars = [];
   if (_envState.hfToken) envVars.push('export HF_TOKEN=' + _shellQuote(_envState.hfToken));
-  if (_envState.gpus) envVars.push('export CUDA_VISIBLE_DEVICES=' + _shellQuote(_envState.gpus));
+  if (_envState.gpus && !_isApplePlatform()) envVars.push('export CUDA_VISIBLE_DEVICES=' + _shellQuote(_envState.gpus));
   if (envVars.length) parts.push(envVars.join(' && '));
   if (parts.length === 0) return '';
   return parts.join(' && ') + ' &&';
@@ -366,11 +380,12 @@ export function _buildServeCmd(f, modelName, backend) {
   } else if (backend === 'llamacpp') {
     const ggufPath = f._gguf_path || 'model.gguf';
     const gpuId = f.gpu_id?.trim() || '';
+    const isApple = _isApplePlatform();
     const py = _isWindows() ? 'python' : 'python3';
     const lcPrefix = (() => {
       let p = '';
-      if (f.unified_mem && !_isWindows()) p += `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 `;
-      if (gpuId && !_isWindows()) p += `CUDA_VISIBLE_DEVICES=${gpuId} `;
+      if (f.unified_mem && !_isWindows() && !isApple) p += `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 `;
+      if (gpuId && !_isWindows() && !isApple) p += `CUDA_VISIBLE_DEVICES=${gpuId} `;
       return p;
     })();
     if (f.unified_mem && _isWindows()) cmd += `$env:GGML_CUDA_ENABLE_UNIFIED_MEMORY="1"; `;
@@ -381,7 +396,7 @@ export function _buildServeCmd(f, modelName, backend) {
       cmd += `MODEL_FILE=${ggufPath} && { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } || { echo "ERROR: No GGUF found on this host. Either download the model here, or switch to the server where it's cached."; exit 1; } && `;
     }
     const modelArg = _isWindows() ? `"${ggufPath}"` : `"$MODEL_FILE"`;
-    // Prefer the native llama-server binary on Linux — its minja templating
+    // Prefer the native llama-server binary on POSIX — its minja templating
     // renders modern GGUF chat templates that the Python bindings' Jinja2
     // rejects (do_tojson ensure_ascii). Fall back to llama_cpp.server.
     // Don't suppress stderr — surface real errors (missing file, lib, OOM).
@@ -1420,7 +1435,7 @@ function _renderRecipes() {
   html += '<label>GPUs<input class="hwfit-manual-gpus" type="text" inputmode="numeric" placeholder="1"></label>';
   html += '<label>VRAM per GPU<input class="hwfit-manual-vram" type="text" inputmode="decimal" placeholder="8 GB"></label>';
   html += '<label>Total RAM<input class="hwfit-manual-ram" type="text" inputmode="decimal" placeholder="32 GB"></label>';
-  html += '<select class="hwfit-manual-backend"><option value="cuda">CUDA</option><option value="rocm">ROCm</option></select>';
+  html += '<select class="hwfit-manual-backend"><option value="cuda">CUDA</option><option value="rocm">ROCm</option><option value="metal">Metal</option></select>';
   html += '<button type="button" class="hwfit-hw-manual-save">✓ Apply</button>';
   html += '<button type="button" class="hwfit-hw-manual-clear">× Clear</button>';
   html += '</div>';

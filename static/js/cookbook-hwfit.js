@@ -965,6 +965,8 @@ export function _expandModelRow(row, modelData) {
       // schema (repo_id + cmd) — sending `command`/`model` failed Pydantic
       // validation (422), which is why Run silently did nothing.
       const _srv = (_envState.servers || []).find(s => s.host === host);
+      const _srvPlatform = (_srv && _srv.platform) || _envState.platform || '';
+      const _isAppleTarget = ['macos', 'darwin', 'mac'].includes(String(_srvPlatform || '').toLowerCase());
       const payload = {
         repo_id: modelData.name,
         cmd: cmd,
@@ -972,8 +974,8 @@ export function _expandModelRow(row, modelData) {
         ssh_port: (_srv && _srv.port) || undefined,
         env_prefix: envPrefix || undefined,
         hf_token: _envState.hfToken || undefined,
-        gpus: _envState.gpus || cudaDevices || undefined,
-        platform: _envState.platform || undefined,
+        gpus: (!_isAppleTarget && (_envState.gpus || cudaDevices)) || undefined,
+        platform: _srvPlatform || undefined,
       };
 
       try {

@@ -24,7 +24,15 @@ GPU_BANDWIDTH = {
 # Pre-sort keys by length descending for correct substring matching
 _BW_KEYS_SORTED = sorted(GPU_BANDWIDTH.keys(), key=len, reverse=True)
 
-FALLBACK_K = {"cuda": 220, "rocm": 180, "cpu_x86": 70, "cpu_arm": 90}
+FALLBACK_K = {
+    "cuda": 220,
+    "rocm": 180,
+    "metal": 140,
+    "mps": 140,
+    "apple": 140,
+    "cpu_x86": 70,
+    "cpu_arm": 90,
+}
 
 USE_CASE_WEIGHTS = {
     "general":    (0.45, 0.30, 0.15, 0.10),
