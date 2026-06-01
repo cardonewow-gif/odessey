@@ -299,7 +299,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         endpoint_id: Optional[str] = None
         model: Optional[str] = None
         max_time: int = Field(default=300, ge=60, le=1800)
-        extraction_timeout: Optional[int] = Field(default=None, ge=15, le=600)
+        extraction_timeout: Optional[int] = Field(default=None, ge=15, le=3600)
         extraction_concurrency: Optional[int] = Field(default=None, ge=1, le=12)
         category: Optional[str] = None
 
@@ -393,12 +393,14 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
 
         # max_rounds=0 → "Auto", let AI decide; pass 20 as the safety cap.
         effective_max_rounds = body.max_rounds if body.max_rounds > 0 else 20
+        hard_timeout = max(600, body.max_time + 60)
         research_handler.start_research(
             session_id=session_id,
             query=body.query,
             llm_endpoint=ep_url,
             llm_model=ep_model,
             max_time=body.max_time,
+            hard_timeout=hard_timeout,
             llm_headers=ep_headers,
             max_rounds=effective_max_rounds,
             search_provider=body.search_provider or None,
