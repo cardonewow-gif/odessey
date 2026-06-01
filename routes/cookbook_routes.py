@@ -26,6 +26,8 @@ from core.platform_compat import (
     pid_alive,
     safe_chmod,
     which_tool,
+    translate_path,
+    get_wsl_windows_user_profile,
 )
 from routes.shell_routes import TMUX_LOG_DIR
 
@@ -713,16 +715,20 @@ def setup_cookbook_routes() -> APIRouter:
         paths_code += "        models.append({'repo_id':d,'size_bytes':sz,'nb_files':nf,'has_incomplete':False,'path':p,'is_local_dir':True,'is_diffusion':is_diff,'is_gguf':is_gguf})\n"
         # Always scan HF cache
         paths_code += "scan_hf(os.path.expanduser('~/.cache/huggingface/hub'))\n"
+        # If running locally under WSL, also scan host Windows HF cache if it exists
+        if not host:
+            win_profile = get_wsl_windows_user_profile()
+            if win_profile:
+                win_hf_hub = os.path.join(win_profile, ".cache", "huggingface", "hub")
+                paths_code += f"scan_hf({win_hf_hub!r})\n"
         # Also scan custom model dirs (comma-separated) if specified
         if model_dir:
             for d in model_dir.split(','):
                 d = d.strip()
                 if d and d != '~/.cache/huggingface/hub':
-                    # repr() encodes the dir as a properly-escaped Python string
-                    # literal. The old f"...'{d}'..." broke out of the quotes on
-                    # any `'` in the value, injecting arbitrary Python that then
-                    # ran locally or over ssh.
-                    paths_code += f"scan_dir(os.path.expanduser({d!r}))\n"
+                    # Translate path if it's Windows style under WSL
+                    translated_d = translate_path(d) if not host else d
+                    paths_code += f"scan_dir(os.path.expanduser({translated_d!r}))\n"
         paths_code += "print(json.dumps(models))\n"
 
         scan_py = TMUX_LOG_DIR / "scan_cache.py"

@@ -161,16 +161,53 @@ def cmd_gpus(args) -> None:
     cmd = prefix + (query.split() if not prefix else [query])
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if out.returncode != 0 and not prefix:
+            is_wsl = False
+            if sys.platform.startswith("linux"):
+                try:
+                    with open("/proc/version", "r") as f:
+                        if "microsoft" in f.read().lower():
+                            is_wsl = True
+                except Exception:
+                    pass
+            if is_wsl:
+                import shutil
+                nsmi_exe = shutil.which("nvidia-smi.exe") or "nvidia-smi.exe"
+                wsl_cmd = [nsmi_exe] + cmd[1:]
+                out = subprocess.run(wsl_cmd, capture_output=True, text=True, timeout=15)
     except FileNotFoundError:
-        # No nvidia-smi locally → try the Metal fallback before giving up.
         if not prefix:
-            mac = _macos_metal_gpu()
-            if mac is not None:
-                emit({"ok": True, "gpus": mac, "backend": "metal"}, args)
-                return
-        msg = "ssh not found" if prefix else "nvidia-smi not found"
-        emit({"ok": False, "error": msg, "gpus": []}, args)
-        return
+            is_wsl = False
+            if sys.platform.startswith("linux"):
+                try:
+                    with open("/proc/version", "r") as f:
+                        if "microsoft" in f.read().lower():
+                            is_wsl = True
+                except Exception:
+                    pass
+            if is_wsl:
+                import shutil
+                nsmi_exe = shutil.which("nvidia-smi.exe") or "nvidia-smi.exe"
+                try:
+                    wsl_cmd = [nsmi_exe] + cmd[1:]
+                    out = subprocess.run(wsl_cmd, capture_output=True, text=True, timeout=15)
+                except Exception:
+                    out = None
+            else:
+                out = None
+        else:
+            out = None
+
+        if out is None:
+            # No nvidia-smi locally → try the Metal fallback before giving up.
+            if not prefix:
+                mac = _macos_metal_gpu()
+                if mac is not None:
+                    emit({"ok": True, "gpus": mac, "backend": "metal"}, args)
+                    return
+            msg = "ssh not found" if prefix else "nvidia-smi not found"
+            emit({"ok": False, "error": msg, "gpus": []}, args)
+            return
     if out.returncode != 0:
         # nvidia-smi present but errored (or no NVIDIA GPU) — fall back to Metal.
         if not prefix:

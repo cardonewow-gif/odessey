@@ -13,6 +13,17 @@ _remote_platform = None  # set by detect_system(platform=...): "windows", "linux
 _last_gpu_error = None  # set by _detect_nvidia() when nvidia-smi errors (driver mismatch, etc.)
 
 
+def _is_wsl():
+    if platform.system() == "Linux":
+        try:
+            with open("/proc/version", "r") as f:
+                if "microsoft" in f.read().lower():
+                    return True
+        except Exception:
+            pass
+    return False
+
+
 def _run(cmd):
     try:
         if _remote_host:
@@ -73,6 +84,10 @@ def _detect_nvidia():
     global _last_gpu_error
     _last_gpu_error = None
     out = _run(["nvidia-smi", "--query-gpu=memory.total,name", "--format=csv,noheader,nounits"])
+    # Under WSL, try calling nvidia-smi.exe if native linux nvidia-smi is not found/fails
+    if not out and not _remote_host and _is_wsl():
+        nsmi_exe = shutil.which("nvidia-smi.exe") or "nvidia-smi.exe"
+        out = _run([nsmi_exe, "--query-gpu=memory.total,name", "--format=csv,noheader,nounits"])
     # Remote fallback: a non-interactive SSH shell often has a minimal PATH
     # that omits where nvidia-smi lives (/usr/bin, /usr/local/cuda/bin), so the
     # first call silently returns nothing → "No GPU" on hosts that DO have GPUs.
@@ -378,10 +393,77 @@ def _get_cpu_count():
     return os.cpu_count() or 1
 
 
+def _detect_wsl_gpu_via_powershell():
+    """Fallback GPU detection for WSL using powershell.exe to query host WMI/nvidia-smi."""
+    # Single PowerShell command that gathers GPU info from host
+    ps_cmd = (
+        "$gpus = @(); "
+        "try { "
+        "  $nv = nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits 2>$null; "
+        "  if ($LASTEXITCODE -eq 0 -and $nv) { "
+        "    foreach ($line in $nv -split \"`n\") { "
+        "      $p = $line -split ','; "
+        "      if ($p.Count -ge 2) { $gpus += @{name=$p[1].Trim(); vram_mb=[double]$p[0].Trim()} } "
+        "    } "
+        "  } "
+        "} catch {}; "
+        "if ($gpus.Count -eq 0) { "
+        "  $wmiGpu = Get-CimInstance Win32_VideoController | Where-Object { $_.AdapterRAM -gt 0 } | Select-Object -First 1; "
+        "  if ($wmiGpu) { "
+        "    $gpus += @{name=$wmiGpu.Name; vram_mb=[double]($wmiGpu.AdapterRAM / 1048576)} "
+        "  } "
+        "}; "
+        "if ($gpus.Count -gt 0) { "
+        "  $r = @{gpus=$gpus}; "
+        "  $r | ConvertTo-Json -Compress "
+        "}"
+    )
+
+    try:
+        ps_exe = shutil.which("powershell.exe") or "powershell.exe"
+        r = subprocess.run(
+            [ps_exe, "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=10
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            import json as _json
+            d = _json.loads(r.stdout.strip())
+            gpus_list = d.get("gpus", [])
+            if not isinstance(gpus_list, list):
+                gpus_list = [gpus_list]
+
+            gpus = []
+            for idx, g in enumerate(gpus_list):
+                name = g.get("name", "Windows Host GPU")
+                vram_mb = g.get("vram_mb", 0)
+                gpus.append({
+                    "index": idx,
+                    "name": name,
+                    "vram_gb": vram_mb / 1024.0
+                })
+            if gpus:
+                total_vram = sum(g["vram_gb"] for g in gpus)
+                groups = _group_gpus(gpus)
+                return {
+                    "gpu_name": gpus[0]["name"],
+                    "gpu_vram_gb": round(total_vram, 1),
+                    "gpu_count": len(gpus),
+                    "gpus": gpus,
+                    "gpu_groups": groups,
+                    "homogeneous": len(groups) <= 1,
+                    "backend": "cuda",
+                }
+    except Exception:
+        pass
+    return None
+
+
 def _powershell_exe():
     """Pick the best PowerShell executable for LOCAL execution: prefer pwsh
     (PowerShell 7+), fall back to Windows PowerShell 5.1. Returns an absolute
     path so we don't depend on a particular PATH ordering."""
+    if _is_wsl():
+        return shutil.which("powershell.exe") or "powershell.exe"
     return shutil.which("pwsh") or shutil.which("powershell") or "powershell"
 
 
@@ -552,6 +634,9 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
     cpu_name = _get_cpu_name()
 
     gpu_info = _detect_apple_silicon() or _detect_nvidia() or _detect_amd()
+
+    if not gpu_info and not _remote_host and _is_wsl():
+        gpu_info = _detect_wsl_gpu_via_powershell()
 
     if gpu_info:
         result = {
