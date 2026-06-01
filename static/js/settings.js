@@ -2530,13 +2530,14 @@ async function initEmailAccountsSettings() {
     // IMAP and SMTP. Dovecot is IMAP-only here; the host is intentionally
     // blank because it may live on another machine (DNS, LAN, Tailscale).
     const PROVIDERS = {
-      gmail:    { label: 'Gmail',                  imap: { host: 'imap.gmail.com',           port: 993, starttls: false }, smtp: { host: 'smtp.gmail.com',            port: 465 } },
-      migadu:   { label: 'Migadu',                 imap: { host: 'imap.migadu.com',          port: 993, starttls: false }, smtp: { host: 'smtp.migadu.com',           port: 465 } },
-      icloud:   { label: 'iCloud',                 imap: { host: 'imap.mail.me.com',         port: 993, starttls: false }, smtp: { host: 'smtp.mail.me.com',          port: 587 } },
-      outlook:  { label: 'Outlook / Office 365',   imap: { host: 'outlook.office365.com',    port: 993, starttls: false }, smtp: { host: 'smtp.office365.com',        port: 587 } },
-      fastmail: { label: 'Fastmail',               imap: { host: 'imap.fastmail.com',        port: 993, starttls: false }, smtp: { host: 'smtp.fastmail.com',         port: 465 } },
-      yahoo:    { label: 'Yahoo',                  imap: { host: 'imap.mail.yahoo.com',      port: 993, starttls: false }, smtp: { host: 'smtp.mail.yahoo.com',       port: 465 } },
-      dovecot:  { label: 'Dovecot IMAP (no SMTP)',  imap: { host: '',                        port: 31143, starttls: false }, smtp: { host: '',                          port: 465 } },
+      gmail:             { label: 'Gmail',                       imap: { host: 'imap.gmail.com',        port: 993, starttls: false }, smtp: { host: 'smtp.gmail.com',        port: 465 } },
+      google_workspace:  { label: 'Google Workspace / .edu',   imap: { host: 'imap.gmail.com',        port: 993, starttls: false }, smtp: { host: 'smtp.gmail.com',        port: 587 }, oauth: 'google' },
+      migadu:            { label: 'Migadu',                     imap: { host: 'imap.migadu.com',       port: 993, starttls: false }, smtp: { host: 'smtp.migadu.com',       port: 465 } },
+      icloud:            { label: 'iCloud',                     imap: { host: 'imap.mail.me.com',      port: 993, starttls: false }, smtp: { host: 'smtp.mail.me.com',      port: 587 } },
+      outlook:           { label: 'Outlook / Office 365',       imap: { host: 'outlook.office365.com', port: 993, starttls: false }, smtp: { host: 'smtp.office365.com',    port: 587 } },
+      fastmail:          { label: 'Fastmail',                   imap: { host: 'imap.fastmail.com',     port: 993, starttls: false }, smtp: { host: 'smtp.fastmail.com',     port: 465 } },
+      yahoo:             { label: 'Yahoo',                      imap: { host: 'imap.mail.yahoo.com',   port: 993, starttls: false }, smtp: { host: 'smtp.mail.yahoo.com',   port: 465 } },
+      dovecot:           { label: 'Dovecot IMAP (no SMTP)',     imap: { host: '',                      port: 31143, starttls: false }, smtp: { host: '',                     port: 465 } },
     };
     const _providerOptions = Object.entries(PROVIDERS)
       .map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`)
@@ -2545,13 +2546,19 @@ async function initEmailAccountsSettings() {
       <h3 style="font-size:12px;margin:0 0 8px">${isEdit ? 'Edit Account' : 'New Account'}</h3>
       <div class="settings-col">
         <div class="settings-row"><label class="settings-label">Provider${_hint('Pick a known provider to auto-fill the IMAP and SMTP host/port. Choose Custom to type your own.')}</label><select id="eaf-provider" class="settings-select"><option value="">Custom…</option>${_providerOptions}</select></div>
-        <div class="settings-row"><label class="settings-label">Name${_hint('Optional label for this account (e.g. “Work” or “Personal”). Leave blank to use the email address.')}</label><input id="eaf-name" class="settings-input" placeholder="(optional — leave blank to use email)" value="${esc(a.name || '')}"></div>
+        <div class="settings-row"><label class="settings-label">Name${_hint('Optional label for this account (e.g. "Work" or "Personal"). Leave blank to use the email address.')}</label><input id="eaf-name" class="settings-input" placeholder="(optional — leave blank to use email)" value="${esc(a.name || '')}"></div>
         <div class="settings-row"><label class="settings-label">Email${_hint('Your email address. Used as the From: header on outgoing mail and as the display label when Name is blank.')}</label><input id="eaf-from" class="settings-input" placeholder="you@example.com" value="${esc(a.from_address || '')}"></div>
+        <div class="settings-row"><label class="settings-label">Display Name${_hint('Your name as it appears in the From: field of emails you send, e.g. Jane Smith. Auto-filled from Google during OAuth.')}</label><input id="eaf-display-name" class="settings-input" placeholder="Your Name" value="${esc(a.display_name || '')}"></div>
+        <div id="eaf-oauth-section" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:6px;background:color-mix(in srgb,var(--accent,#50fa7b) 6%,transparent)">
+          <div style="font-size:11px;font-weight:600;margin-bottom:6px">Google OAuth2 — required for Workspace / .edu accounts</div>
+          <div id="eaf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px">${a.oauth_provider === 'google' ? '✓ Connected via Google OAuth' : 'Not connected — click below to authorize'}</div>
+          <button type="button" id="eaf-oauth-btn" class="admin-btn-add" style="font-size:11px">${a.oauth_provider === 'google' ? 'Reconnect with Google' : 'Connect with Google'}</button>
+        </div>
         <div style="font-size:11px;font-weight:600;opacity:0.6;margin:6px 0 2px">IMAP (Receiving)</div>
         <div class="settings-row"><label class="settings-label">Host${_hint('Your IMAP server, e.g. imap.gmail.com, imap.migadu.com, a LAN host, or a Tailscale IP for Dovecot.')}</label><input id="eaf-imap-host" class="settings-input" value="${esc(a.imap_host || '')}"></div>
         <div class="settings-row"><label class="settings-label">Port${_hint('993 for IMAPS (most providers), 143 for plain or STARTTLS. Local servers often use a custom port like 31143.')}</label><input id="eaf-imap-port" class="settings-input" type="number" value="${esc(a.imap_port || 993)}" style="max-width:100px"></div>
         <div class="settings-row"><label class="settings-label">Username${_hint('Usually your full email address.')}</label><input id="eaf-imap-user" class="settings-input" value="${esc(a.imap_user || '')}"></div>
-        <div class="settings-row"><label class="settings-label">Password${_hint('Your IMAP login password. Use an app-specific password if your provider requires 2FA (Gmail, iCloud, etc.).')}</label><input id="eaf-imap-pass" class="settings-input" type="password" placeholder="${isEdit && a.has_imap_password ? '(unchanged)' : ''}"></div>
+        <div class="eaf-password-section"><div class="settings-row"><label class="settings-label">Password${_hint('Your IMAP login password. Use an app-specific password if your provider requires 2FA (Gmail, iCloud, etc.).')}</label><input id="eaf-imap-pass" class="settings-input" type="password" placeholder="${isEdit && a.has_imap_password ? '(unchanged)' : ''}"></div></div>
         <div class="settings-row"><label class="settings-label">STARTTLS${_hint('Turn ON for port 143/587 to upgrade plain to TLS. Turn OFF for port 993 (IMAPS — already encrypted) or a local server with no TLS configured.')}</label><label class="admin-switch"><input type="checkbox" id="eaf-imap-starttls" ${a.imap_starttls !== false ? 'checked' : ''}><span class="admin-slider"></span></label></div>
         <div style="font-size:11px;font-weight:600;opacity:0.6;margin:8px 0 2px">SMTP (Sending) <span style="font-weight:normal;opacity:0.7">— optional, leave blank for read-only</span></div>
         <div class="settings-row"><label class="settings-label">Host${_hint('Your outgoing-mail server, e.g. smtp.gmail.com, smtp.migadu.com. Leave blank to make this account read-only.')}</label><input id="eaf-smtp-host" class="settings-input" value="${esc(a.smtp_host || '')}"></div>
@@ -2573,15 +2580,53 @@ async function initEmailAccountsSettings() {
       </div>
     `;
 
+    // Show/hide OAuth section and password fields based on provider selection.
+    function _syncOauthUI(providerKey) {
+      const p = PROVIDERS[providerKey];
+      const isOauth = !!(p && p.oauth);
+      el('eaf-oauth-section').style.display = isOauth ? '' : 'none';
+      formEl.querySelectorAll('.eaf-password-section').forEach(r => {
+        r.style.display = isOauth ? 'none' : '';
+      });
+    }
+
     // Provider preset → autofill host/port/STARTTLS for both halves.
     el('eaf-provider').addEventListener('change', (e) => {
       const p = PROVIDERS[e.target.value];
-      if (!p) return;
+      if (!p) { _syncOauthUI(''); return; }
       el('eaf-imap-host').value = p.imap.host;
       el('eaf-imap-port').value = p.imap.port;
       el('eaf-imap-starttls').checked = !!p.imap.starttls;
       el('eaf-smtp-host').value = p.smtp.host;
       el('eaf-smtp-port').value = p.smtp.port;
+      _syncOauthUI(e.target.value);
+    });
+
+    // Init OAuth UI for accounts already connected via OAuth.
+    if (a.oauth_provider === 'google') _syncOauthUI('google_workspace');
+
+    // "Connect with Google" button — save the account first, then redirect to OAuth.
+    el('eaf-oauth-btn').addEventListener('click', async () => {
+      // Must save the account first to get an account_id to pass to the OAuth flow.
+      const body = {
+        name: el('eaf-name').value.trim() || el('eaf-from').value.trim(),
+        from_address: el('eaf-from').value.trim(),
+        imap_host: el('eaf-imap-host').value.trim(),
+        imap_port: parseInt(el('eaf-imap-port').value) || 993,
+        imap_user: el('eaf-imap-user').value.trim(),
+        imap_starttls: el('eaf-imap-starttls').checked,
+        smtp_host: el('eaf-smtp-host').value.trim(),
+        smtp_port: parseInt(el('eaf-smtp-port').value) || 587,
+        smtp_user: el('eaf-imap-user').value.trim(),
+      };
+      if (!body.name) { el('eaf-msg').textContent = 'Enter a Name or Email first'; el('eaf-msg').style.color = 'var(--red)'; return; }
+      const url = isEdit ? `/api/email/accounts/${a.id}` : '/api/email/accounts';
+      const method = isEdit ? 'PUT' : 'POST';
+      const r = await fetch(url, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const d = await r.json();
+      if (!d.ok) { el('eaf-msg').textContent = d.error || 'Save failed'; el('eaf-msg').style.color = 'var(--red)'; return; }
+      const accId = isEdit ? a.id : d.id;
+      window.location.href = `/api/email/oauth/google/authorize?account_id=${encodeURIComponent(accId)}`;
     });
 
     // "Same as IMAP" toggle — hide the SMTP creds rows when on. The save
@@ -2600,6 +2645,7 @@ async function initEmailAccountsSettings() {
       const body = {
         name: el('eaf-name').value.trim(),
         from_address: el('eaf-from').value.trim(),
+        display_name: el('eaf-display-name').value.trim(),
         imap_host: el('eaf-imap-host').value.trim(),
         imap_port: parseInt(el('eaf-imap-port').value) || 993,
         imap_user: el('eaf-imap-user').value.trim(),
@@ -3618,13 +3664,15 @@ async function initUnifiedIntegrations() {
     // Dovecot is IMAP-only here; the host is intentionally blank because
     // it may be remote (DNS, LAN, Tailscale), not localhost.
     const PROVIDERS = {
-      gmail:    { label: 'Gmail',                   emailEx: 'you@gmail.com',     imap: { host: 'imap.gmail.com',           port: 993, starttls: false }, smtp: { host: 'smtp.gmail.com',     port: 465 } },
-      migadu:   { label: 'Migadu',                  emailEx: 'you@yourdomain.com', imap: { host: 'imap.migadu.com',          port: 993, starttls: false }, smtp: { host: 'smtp.migadu.com',    port: 465 } },
-      icloud:   { label: 'iCloud',                  emailEx: 'you@icloud.com',    imap: { host: 'imap.mail.me.com',         port: 993, starttls: false }, smtp: { host: 'smtp.mail.me.com',   port: 587 } },
-      outlook:  { label: 'Outlook / Office 365',    emailEx: 'you@outlook.com',   imap: { host: 'outlook.office365.com',    port: 993, starttls: false }, smtp: { host: 'smtp.office365.com', port: 587 } },
-      fastmail: { label: 'Fastmail',                emailEx: 'you@fastmail.com',  imap: { host: 'imap.fastmail.com',        port: 993, starttls: false }, smtp: { host: 'smtp.fastmail.com',  port: 465 } },
-      yahoo:    { label: 'Yahoo',                   emailEx: 'you@yahoo.com',     imap: { host: 'imap.mail.yahoo.com',      port: 993, starttls: false }, smtp: { host: 'smtp.mail.yahoo.com', port: 465 } },
-      dovecot:  { label: 'Dovecot IMAP (no SMTP)',  emailEx: 'you@example.com',   imap: { host: '',                         port: 31143, starttls: false }, smtp: { host: '',                   port: 465 } },
+      gmail:            { label: 'Gmail',                       emailEx: 'you@gmail.com',     imap: { host: 'imap.gmail.com',           port: 993, starttls: false }, smtp: { host: 'smtp.gmail.com',     port: 465 } },
+      google_workspace: { label: 'Google Workspace / .edu (OAuth)', emailEx: 'you@school.edu', imap: { host: 'imap.gmail.com',       port: 993, starttls: false }, smtp: { host: 'smtp.gmail.com',     port: 587 }, oauth: 'google' },
+      migadu:           { label: 'Migadu',                      emailEx: 'you@yourdomain.com', imap: { host: 'imap.migadu.com',          port: 993, starttls: false }, smtp: { host: 'smtp.migadu.com',    port: 465 } },
+      icloud:           { label: 'iCloud',                      emailEx: 'you@icloud.com',    imap: { host: 'imap.mail.me.com',         port: 993, starttls: false }, smtp: { host: 'smtp.mail.me.com',   port: 587 } },
+      outlook:          { label: 'Outlook / Office 365 (password)', emailEx: 'you@outlook.com', imap: { host: 'outlook.office365.com', port: 993, starttls: false }, smtp: { host: 'smtp.office365.com', port: 587 } },
+      microsoft_365:    { label: 'Microsoft 365 / Outlook (OAuth)', emailEx: 'you@company.com', imap: { host: 'outlook.office365.com', port: 993, starttls: false }, smtp: { host: 'smtp.office365.com', port: 587 }, oauth: 'microsoft' },
+      fastmail:         { label: 'Fastmail',                    emailEx: 'you@fastmail.com',  imap: { host: 'imap.fastmail.com',        port: 993, starttls: false }, smtp: { host: 'smtp.fastmail.com',  port: 465 } },
+      yahoo:            { label: 'Yahoo',                       emailEx: 'you@yahoo.com',     imap: { host: 'imap.mail.yahoo.com',      port: 993, starttls: false }, smtp: { host: 'smtp.mail.yahoo.com', port: 465 } },
+      dovecot:          { label: 'Dovecot IMAP (no SMTP)',      emailEx: 'you@example.com',   imap: { host: '',                         port: 31143, starttls: false }, smtp: { host: '',                   port: 465 } },
     };
     const _providerOptions = Object.entries(PROVIDERS)
       .map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('');
@@ -3636,11 +3684,29 @@ async function initUnifiedIntegrations() {
           <div id="uf-email-provider-note" style="display:none;font-size:11px;line-height:1.5;padding:8px 10px;margin:2px 0 4px;border:1px solid color-mix(in srgb, var(--fg) 15%, transparent);border-left:3px solid var(--accent, var(--red));border-radius:4px;background:color-mix(in srgb, var(--fg) 4%, transparent);"></div>
           <div class="settings-row"><label class="settings-label">Name${_hint('Optional label for this account (e.g. “Work” or “Personal”). Leave blank to use the email address.')}</label><input id="uf-email-name" class="settings-input" placeholder="(optional — leave blank to use email)"></div>
           <div class="settings-row"><label class="settings-label">Email${_hint('Your email address. Used as the From: header on outgoing mail and as the display label when Name is blank.')}</label><input id="uf-email-from" class="settings-input" placeholder="you@example.com"></div>
+          <div id="uf-oauth-section" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:6px;background:color-mix(in srgb,var(--accent,#50fa7b) 6%,transparent)">
+            <div id="uf-oauth-title" style="font-size:11px;font-weight:600;margin-bottom:6px"></div>
+            <details id="uf-oauth-appcfg" style="margin-bottom:8px">
+              <summary style="cursor:pointer;font-size:11px;opacity:0.9">App credentials <span id="uf-oauth-cfgstate" style="opacity:0.7;margin-left:4px"></span></summary>
+              <div style="margin-top:7px;display:flex;flex-direction:column;gap:6px">
+                <div style="font-size:10px;opacity:0.75;line-height:1.5">Register this <b>redirect URI</b> in your provider's app:<br>
+                  <code id="uf-oauth-redirect" style="font-size:10px;word-break:break-all"></code>
+                  <button type="button" id="uf-oauth-redirect-copy" class="admin-btn-sm" style="font-size:10px;margin-left:4px">Copy</button>
+                </div>
+                <input id="uf-oauth-clientid" class="settings-input" placeholder="Client ID" autocomplete="off">
+                <input id="uf-oauth-secret" class="settings-input" type="password" placeholder="Client secret" autocomplete="off">
+                <input id="uf-oauth-tenant" class="settings-input" placeholder="Tenant (common)" autocomplete="off">
+                <button type="button" id="uf-oauth-savecfg" class="admin-btn-add" style="font-size:11px">Save app credentials</button>
+              </div>
+            </details>
+            <div id="uf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px"></div>
+            <button type="button" id="uf-oauth-btn" class="admin-btn-add" style="font-size:11px">Connect</button>
+          </div>
           <div style="font-size:11px;font-weight:600;opacity:0.6;margin:4px 0 2px">IMAP (Receiving)</div>
           <div class="settings-row"><label class="settings-label">Host${_hint('Your IMAP server, e.g. imap.gmail.com, imap.migadu.com, a LAN host, or a Tailscale IP for Dovecot.')}</label><input id="uf-imap-host" class="settings-input" placeholder="imap.example.com"></div>
           <div class="settings-row"><label class="settings-label">Port${_hint('993 for IMAPS (most providers), 143 for plain or STARTTLS. Local servers often use a custom port like 31143.')}</label><input id="uf-imap-port" class="settings-input" type="number" placeholder="993" style="max-width:100px"></div>
           <div class="settings-row"><label class="settings-label">Username${_hint('Yes — your full email address goes here too (e.g. you@gmail.com). Same as the Email field above for almost every provider.')}</label><input id="uf-imap-user" class="settings-input" placeholder="you@example.com"></div>
-          <div class="settings-row"><label class="settings-label">Password${_hint('For Gmail, iCloud, and Yahoo: paste your App Password (NOT your normal account password — those are blocked for IMAP). For Migadu, Fastmail, Outlook, etc.: your regular mailbox password works.')}</label><input id="uf-imap-pass" class="settings-input" type="password" placeholder="${placeholderPass}"></div>
+          <div class="settings-row uf-imap-pass-row"><label class="settings-label">Password${_hint('For Gmail, iCloud, and Yahoo: paste your App Password (NOT your normal account password — those are blocked for IMAP). For Migadu, Fastmail, Outlook, etc.: your regular mailbox password works.')}</label><input id="uf-imap-pass" class="settings-input" type="password" placeholder="${placeholderPass}"></div>
           <div class="settings-row"><label class="settings-label">STARTTLS${_hint('Turn ON for port 143/587 to upgrade plain to TLS. Turn OFF for port 993 (IMAPS — already encrypted) or a local server with no TLS configured.')}</label><label class="admin-switch" style="margin-left:0"><input type="checkbox" id="uf-imap-starttls" checked><span class="admin-slider"></span></label></div>
           <div style="font-size:11px;font-weight:600;opacity:0.6;margin:8px 0 2px">SMTP (Sending) <span style="font-weight:normal;opacity:0.7">— optional, leave blank for read-only</span></div>
           <div class="settings-row"><label class="settings-label">Host${_hint('Your outgoing-mail server, e.g. smtp.gmail.com. Leave blank to make this account read-only.')}</label><input id="uf-smtp-host" class="settings-input" placeholder="smtp.example.com"></div>
@@ -3758,12 +3824,130 @@ async function initUnifiedIntegrations() {
         </div>`;
     };
 
+    // ── OAuth providers (Google / Microsoft) ──
+    // For OAuth providers there's no password to enter: the IMAP/SMTP password
+    // rows, the SMTP "Same as IMAP" row, and the (IMAP/SMTP) Test button are
+    // hidden, and a "Connect with ..." button drives the consent flow.
+    const OAUTH_META = {
+      google:    { name: 'Google',    note: 'required for Workspace / .edu accounts' },
+      microsoft: { name: 'Microsoft', note: 'required for Microsoft 365 / Outlook accounts (uses Graph)' },
+    };
+    let _activeOauth = '';
+    function _syncOauthUI(providerKey) {
+      const p = PROVIDERS[providerKey];
+      const prov = (p && p.oauth) || '';
+      _activeOauth = prov;
+      const isOauth = !!prov;
+      el('uf-oauth-section').style.display = isOauth ? '' : 'none';
+      const passRow = formEl.querySelector('.uf-imap-pass-row');
+      if (passRow) passRow.style.display = isOauth ? 'none' : '';
+      const sameRow = el('uf-smtp-same') ? el('uf-smtp-same').closest('.settings-row') : null;
+      if (sameRow) sameRow.style.display = isOauth ? 'none' : '';
+      const testBtn = el('uf-email-test');
+      if (testBtn) testBtn.style.display = isOauth ? 'none' : '';
+      const smtpSame = !!(el('uf-smtp-same') && el('uf-smtp-same').checked);
+      formEl.querySelectorAll('.uf-smtp-creds').forEach(r => {
+        r.style.display = (isOauth || smtpSame) ? 'none' : '';
+      });
+      if (isOauth) {
+        const meta = OAUTH_META[prov] || { name: prov, note: '' };
+        const connected = !!(existing && existing.oauth_provider === prov);
+        el('uf-oauth-title').textContent = `${meta.name} OAuth2 — ${meta.note}`;
+        el('uf-oauth-status').textContent = connected
+          ? `✓ Connected via ${meta.name} OAuth`
+          : 'Not connected — fill Name/Email above, then click below to authorize.';
+        el('uf-oauth-btn').textContent = connected ? `Reconnect with ${meta.name}` : `Connect with ${meta.name}`;
+        el('uf-oauth-tenant').style.display = prov === 'microsoft' ? '' : 'none';
+        _refreshOauthAppCfg(prov);
+      }
+    }
+
+    // Load the saved app credentials (Client ID / tenant / redirect URI) for a
+    // provider into the panel. The secret is never returned — a saved one shows
+    // as a placeholder and is kept unless the user types a new value.
+    async function _refreshOauthAppCfg(prov) {
+      try {
+        const r = await fetch(`/api/email/oauth/app-config?provider=${encodeURIComponent(prov)}`, { credentials: 'same-origin' });
+        const d = await r.json();
+        el('uf-oauth-clientid').value = d.client_id || '';
+        el('uf-oauth-secret').value = '';
+        el('uf-oauth-secret').placeholder = d.has_client_secret ? '(saved — leave blank to keep)' : 'Client secret';
+        el('uf-oauth-redirect').textContent = d.redirect_uri || '';
+        if (prov === 'microsoft') el('uf-oauth-tenant').value = d.tenant || 'common';
+        el('uf-oauth-cfgstate').textContent = d.configured ? '✓ configured' : '— not configured yet';
+        el('uf-oauth-appcfg').open = !d.configured;  // auto-expand when unset
+      } catch (_) {}
+    }
+
+    el('uf-oauth-savecfg').addEventListener('click', async () => {
+      const prov = _activeOauth;
+      if (!prov) return;
+      const body = { provider: prov, client_id: el('uf-oauth-clientid').value.trim(), tenant: el('uf-oauth-tenant').value.trim() };
+      const sec = el('uf-oauth-secret').value;
+      if (sec) body.client_secret = sec;
+      const st = el('uf-oauth-cfgstate');
+      st.textContent = 'saving…';
+      try {
+        const r = await fetch('/api/email/oauth/app-config', { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await r.json();
+        if (d.ok) { await _refreshOauthAppCfg(prov); }
+        else { st.textContent = '— ' + (d.error || 'save failed'); }
+      } catch (e) { st.textContent = '— error: ' + e.message; }
+    });
+
+    el('uf-oauth-redirect-copy').addEventListener('click', async () => {
+      const ok = await _copyProviderUrl(el('uf-oauth-redirect').textContent || '');
+      const b = el('uf-oauth-redirect-copy');
+      if (ok) { b.textContent = 'Copied'; setTimeout(() => { if (b.isConnected) b.textContent = 'Copy'; }, 1200); }
+    });
+
+    // "Connect with ..." — persist the account first (we need an account_id to
+    // stamp the tokens onto), then redirect into the provider consent flow.
+    el('uf-oauth-btn').addEventListener('click', async () => {
+      const prov = _activeOauth || 'microsoft';
+      const msg = el('uf-email-msg');
+      // Don't leave the page if the OAuth app isn't configured yet.
+      try {
+        const cr = await fetch(`/api/email/oauth/app-config?provider=${encodeURIComponent(prov)}`, { credentials: 'same-origin' });
+        const cd = await cr.json();
+        if (!cd.configured) {
+          msg.textContent = 'Enter the app Client ID + secret under “App credentials” first';
+          msg.style.color = 'var(--red)';
+          el('uf-oauth-appcfg').open = true;
+          return;
+        }
+      } catch (_) {}
+      const body = {
+        name: el('uf-email-name').value.trim() || el('uf-email-from').value.trim(),
+        from_address: el('uf-email-from').value.trim(),
+        imap_host: el('uf-imap-host').value.trim(),
+        imap_port: parseInt(el('uf-imap-port').value) || 993,
+        imap_starttls: el('uf-imap-starttls').checked,
+        smtp_host: el('uf-smtp-host').value.trim(),
+        smtp_port: parseInt(el('uf-smtp-port').value) || 587,
+        is_default: el('uf-email-default').checked,
+      };
+      if (!body.name) { msg.textContent = 'Enter a Name or Email first'; msg.style.color = 'var(--red)'; return; }
+      try {
+        const url = isEdit ? `/api/email/accounts/${editId}` : '/api/email/accounts';
+        const method = isEdit ? 'PUT' : 'POST';
+        const r = await fetch(url, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await r.json();
+        if (!(d.ok || d.id)) { msg.textContent = d.error || 'Save failed'; msg.style.color = 'var(--red)'; return; }
+        const accId = isEdit ? editId : d.id;
+        window.location.href = `/api/email/oauth/${prov}/authorize?account_id=${encodeURIComponent(accId)}`;
+      } catch (e) {
+        msg.textContent = 'Error: ' + e.message; msg.style.color = 'var(--red)';
+      }
+    });
+
     // Provider preset → autofill IMAP + SMTP host/port + STARTTLS, set the
     // helper note, and update the Email/Username placeholders to a
     // provider-specific example so users see the right format at a glance.
     el('uf-email-provider').addEventListener('change', (e) => {
       const key = e.target.value;
       _renderProviderNote(key);
+      _syncOauthUI(key);
       const p = PROVIDERS[key];
       if (!p) return;
       el('uf-imap-host').value = p.imap.host;
@@ -3804,6 +3988,10 @@ async function initUnifiedIntegrations() {
       const sameCreds = !!(existing.imap_user && existing.smtp_user && existing.imap_user === existing.smtp_user);
       el('uf-smtp-same').checked = sameCreds || !existing.smtp_user;
       _syncSmtpSame();
+      // Reflect an OAuth-connected account: select the provider preset and
+      // swap the form into OAuth mode (Connect → Reconnect).
+      if (existing.oauth_provider === 'google') { el('uf-email-provider').value = 'google_workspace'; _syncOauthUI('google_workspace'); }
+      else if (existing.oauth_provider === 'microsoft') { el('uf-email-provider').value = 'microsoft_365'; _syncOauthUI('microsoft_365'); }
     } else {
       el('uf-imap-port').value = 993;
       el('uf-smtp-port').value = 465;
@@ -4302,6 +4490,40 @@ export function close() {
     modalEl.classList.add('hidden');
   }
 }
+
+// Handle redirect back from Google OAuth2 — open settings to integrations and show status.
+(function _handleOauthRedirect() {
+  const sp = new URLSearchParams(window.location.search);
+  if (!sp.has('email_oauth_success') && !sp.has('email_oauth_error')) return;
+  // Strip params from URL without a page reload.
+  const clean = window.location.pathname + window.location.hash;
+  window.history.replaceState(null, '', clean);
+  const success = sp.has('email_oauth_success');
+  const errMsg = sp.get('email_oauth_error') || '';
+  // Open settings → integrations after the app has initialised.
+  function _tryOpen() {
+    if (window.settingsModule && typeof window.settingsModule.open === 'function') {
+      window.settingsModule.open('integrations');
+      // Brief toast-style banner.
+      const banner = document.createElement('div');
+      banner.textContent = success
+        ? '✓ Google account connected — email is ready'
+        : `Google OAuth failed: ${errMsg || 'unknown error'}`;
+      Object.assign(banner.style, {
+        position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)',
+        background: success ? 'var(--accent, #50fa7b)' : 'var(--red, #ff5555)',
+        color: '#000', padding: '8px 18px', borderRadius: '6px', fontSize: '12px',
+        fontWeight: '600', zIndex: '99999', pointerEvents: 'none',
+        boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
+      });
+      document.body.appendChild(banner);
+      setTimeout(() => banner.remove(), 4000);
+    } else {
+      setTimeout(_tryOpen, 100);
+    }
+  }
+  _tryOpen();
+})();
 
 const settingsModule = { open, close, initIntegrations, initUnifiedIntegrations, syncAdminVisibility, refreshAiModelEndpoints };
 

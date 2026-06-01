@@ -13,6 +13,8 @@ and `email_pollers.py` (the background loops):
 """
 
 import os
+import base64
+import time
 import imaplib
 import smtplib
 import email as email_mod
@@ -38,6 +40,249 @@ from src.secret_storage import decrypt as _decrypt
 logger = logging.getLogger(__name__)
 
 
+def _xoauth2_raw(user: str, access_token: str) -> str:
+    """The SASL XOAUTH2 initial-response string (unencoded).
+
+    Both smtplib.SMTP.auth() and imaplib.IMAP4.authenticate() base64-encode
+    the value their callback returns, so callers pass this raw form — never
+    pre-encoded — to avoid double base64.
+    """
+    return f"user={user}\x01auth=Bearer {access_token}\x01\x01"
+
+
+def _xoauth2_bytes(user: str, access_token: str) -> bytes:
+    """Raw XOAUTH2 bytes for imaplib's authenticate() callback."""
+    return _xoauth2_raw(user, access_token).encode()
+
+
+def make_oauth_state(account_id: str, owner: str) -> str:
+    """Return an HMAC-signed, base64-encoded OAuth state token.
+
+    Encodes account_id + owner + a random nonce, signed with the app secret
+    so the callback can validate that the flow was initiated by an
+    authenticated, owning user (CSRF / state-forgery protection).
+    """
+    import hmac as _hmac, hashlib as _hl, secrets as _sec
+    from src.secret_storage import _load_or_create_key
+    nonce = _sec.token_hex(16)
+    payload = json.dumps({"a": account_id, "o": owner, "n": nonce}, separators=(",", ":"))
+    sig = _hmac.new(_load_or_create_key(), payload.encode(), _hl.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}|{sig}".encode()).decode()
+
+
+def verify_oauth_state(state: str) -> dict | None:
+    """Verify an OAuth state token's HMAC signature.
+
+    Returns the decoded payload dict ({"a", "o", "n"}) on success, or None if
+    the token is malformed, tampered, or signed with a different key.
+    """
+    import hmac as _hmac, hashlib as _hl
+    from src.secret_storage import _load_or_create_key
+    try:
+        decoded = base64.urlsafe_b64decode(state.encode()).decode()
+        payload, sig = decoded.rsplit("|", 1)
+        expected = _hmac.new(_load_or_create_key(), payload.encode(), _hl.sha256).hexdigest()
+        if not _hmac.compare_digest(sig, expected):
+            return None
+        return json.loads(payload)
+    except Exception:
+        return None
+
+
+def _email_oauth_app(provider: str) -> dict:
+    """Resolve OAuth *app* credentials (client id/secret/tenant) for a provider.
+
+    Self-hosted users configure these in the UI (Settings -> Integrations ->
+    email account -> the OAuth panel), persisted in data/settings.json with the
+    client secret encrypted. Environment variables remain a fallback so
+    existing .env-based setups keep working.
+
+    Returns {"client_id", "client_secret", "tenant"} (tenant only meaningful
+    for Microsoft; "common" by default).
+    """
+    from src.secret_storage import decrypt as _dec
+    settings = _load_settings()
+
+    def _resolve(skey, env):
+        return (settings.get(skey) or "").strip() or os.environ.get(env, "").strip()
+
+    def _resolve_secret(skey, env):
+        enc = settings.get(skey) or ""
+        if enc:
+            try:
+                return _dec(enc)
+            except Exception:
+                return ""
+        return os.environ.get(env, "")
+
+    if provider == "microsoft":
+        tenant = _resolve("microsoft_oauth_tenant", "MICROSOFT_OAUTH_TENANT") or "common"
+        return {
+            "client_id": _resolve("microsoft_oauth_client_id", "MICROSOFT_OAUTH_CLIENT_ID"),
+            "client_secret": _resolve_secret("microsoft_oauth_client_secret", "MICROSOFT_OAUTH_CLIENT_SECRET"),
+            "tenant": tenant,
+        }
+    if provider == "google":
+        return {
+            "client_id": _resolve("google_oauth_client_id", "GOOGLE_OAUTH_CLIENT_ID"),
+            "client_secret": _resolve_secret("google_oauth_client_secret", "GOOGLE_OAUTH_CLIENT_SECRET"),
+            "tenant": "",
+        }
+    return {"client_id": "", "client_secret": "", "tenant": ""}
+
+
+def _refresh_google_token(account_id: str) -> str | None:
+    """Exchange the stored refresh token for a new access token and persist it."""
+    import httpx
+    from core.database import SessionLocal as _SL, EmailAccount as _EA
+    from src.secret_storage import encrypt as _enc, decrypt as _dec
+    _app = _email_oauth_app("google")
+    client_id = _app["client_id"]
+    client_secret = _app["client_secret"]
+    if not client_id or not client_secret:
+        return None
+    db = _SL()
+    try:
+        row = db.get(_EA, account_id)
+        if not row or not row.oauth_refresh_token:
+            return None
+        refresh_token = _dec(row.oauth_refresh_token or "")
+        if not refresh_token:
+            return None
+        resp = httpx.post("https://oauth2.googleapis.com/token", data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        access_token = data["access_token"]
+        row.oauth_access_token = _enc(access_token)
+        row.oauth_token_expiry = str(int(time.time()) + data.get("expires_in", 3600))
+        db.commit()
+        return access_token
+    except Exception as e:
+        logger.warning(f"Google token refresh failed: {e}")
+        return None
+    finally:
+        db.close()
+
+
+def _get_valid_google_token(account_id: str, cfg: dict) -> str | None:
+    """Return a valid Google access token, refreshing if expired or missing."""
+    from src.secret_storage import decrypt as _dec
+    access_token = _dec(cfg.get("oauth_access_token") or "")
+    expiry_str = cfg.get("oauth_token_expiry") or ""
+    if access_token and expiry_str:
+        try:
+            if int(expiry_str) - 60 > time.time():
+                return access_token
+        except (ValueError, TypeError):
+            pass
+    return _refresh_google_token(account_id)
+
+
+# ── Microsoft (Office 365 / Outlook) OAuth ──
+#
+# Microsoft 365 is accessed via the Graph API (see src/email_graph.py), not
+# IMAP/SMTP XOAUTH2 — Microsoft has disabled Basic Auth for Exchange Online and
+# some tenants block IMAP entirely. Only the OAuth token plumbing lives here,
+# mirroring the Google helpers above; the mail operations live in GraphBackend.
+
+# Graph mail access + offline refresh. `offline_access` yields the refresh
+# token; `User.Read` powers the /me lookup used to auto-fill the address.
+MICROSOFT_OAUTH_SCOPES = "offline_access User.Read Mail.ReadWrite Mail.Send"
+
+
+def _microsoft_tenant() -> str:
+    """Azure AD tenant for the authorize/token endpoints.
+
+    `common` accepts both consumer (outlook.com/hotmail) and work/school
+    accounts; operators can pin a single tenant id in the UI or via env.
+    """
+    return _email_oauth_app("microsoft")["tenant"] or "common"
+
+
+def _refresh_microsoft_token(account_id: str) -> str | None:
+    """Exchange the stored Microsoft refresh token for a new access token.
+
+    Mirrors `_refresh_google_token`. Microsoft's token endpoint wants the
+    `scope` on refresh too, and rotates the refresh token — persist the new
+    one when returned so the grant doesn't silently expire.
+    """
+    import httpx
+    from core.database import SessionLocal as _SL, EmailAccount as _EA
+    from src.secret_storage import encrypt as _enc, decrypt as _dec
+    _app = _email_oauth_app("microsoft")
+    client_id = _app["client_id"]
+    client_secret = _app["client_secret"]
+    if not client_id or not client_secret:
+        return None
+    db = _SL()
+    try:
+        row = db.get(_EA, account_id)
+        if not row or not row.oauth_refresh_token:
+            return None
+        refresh_token = _dec(row.oauth_refresh_token or "")
+        if not refresh_token:
+            return None
+        token_url = f"https://login.microsoftonline.com/{_microsoft_tenant()}/oauth2/v2.0/token"
+        resp = httpx.post(token_url, data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+            "scope": MICROSOFT_OAUTH_SCOPES,
+        }, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        access_token = data["access_token"]
+        row.oauth_access_token = _enc(access_token)
+        row.oauth_token_expiry = str(int(time.time()) + data.get("expires_in", 3600))
+        # Microsoft rotates refresh tokens — keep the latest.
+        if data.get("refresh_token"):
+            row.oauth_refresh_token = _enc(data["refresh_token"])
+        db.commit()
+        return access_token
+    except Exception as e:
+        logger.warning(f"Microsoft token refresh failed: {e}")
+        return None
+    finally:
+        db.close()
+
+
+def _get_valid_microsoft_token(account_id: str, cfg: dict) -> str | None:
+    """Return a valid Microsoft access token, refreshing if expired or missing."""
+    from src.secret_storage import decrypt as _dec
+    access_token = _dec(cfg.get("oauth_access_token") or "")
+    expiry_str = cfg.get("oauth_token_expiry") or ""
+    if access_token and expiry_str:
+        try:
+            if int(expiry_str) - 60 > time.time():
+                return access_token
+        except (ValueError, TypeError):
+            pass
+    return _refresh_microsoft_token(account_id)
+
+
+def _graph_backend(account_id: str | None, owner: str = ""):
+    """Return a GraphBackend for Microsoft 365 accounts, else None.
+
+    The single dispatch point that decides IMAP vs Graph: callers branch on a
+    non-None return. Resolves the account config (one indexed lookup) and only
+    builds a backend when the account authenticates via Microsoft OAuth.
+    """
+    try:
+        cfg = _get_email_config(account_id, owner=owner)
+    except Exception:
+        return None
+    if cfg.get("oauth_provider") != "microsoft":
+        return None
+    from src.email_graph import GraphBackend
+    return GraphBackend(cfg, owner=owner)
+
+
 def _send_smtp_message(cfg: dict, from_addr: str, recipients: list[str], message: str | bytes, timeout: int = 30) -> None:
     """Send through SMTP using the conventional TLS mode for the configured port.
 
@@ -46,20 +291,37 @@ def _send_smtp_message(cfg: dict, from_addr: str, recipients: list[str], message
     directly against 587 raises the classic "[SSL: WRONG_VERSION_NUMBER]"
     error even when credentials are correct.
     """
+    # Microsoft 365 accounts send through Graph /sendMail (no SMTP) — Graph
+    # also files the message in Sent Items, so the caller skips the append.
+    if cfg.get("oauth_provider") == "microsoft":
+        from src.email_graph import GraphBackend
+        raw = message.encode() if isinstance(message, str) else message
+        GraphBackend(cfg).send_mime(raw)
+        return
+
     host = cfg["smtp_host"]
     port = int(cfg.get("smtp_port") or 465)
     user = cfg.get("smtp_user") or ""
     password = cfg.get("smtp_password") or ""
+
+    def _auth_smtp(smtp):
+        if cfg.get("oauth_provider") == "google":
+            token = _get_valid_google_token(cfg.get("account_id"), cfg)
+            if not token:
+                raise RuntimeError("Google OAuth token unavailable — reconnect the account")
+            smtp.ehlo()
+            smtp.auth("XOAUTH2", lambda challenge=None: _xoauth2_raw(user, token), initial_response_ok=True)
+        elif user and password:
+            smtp.login(user, password)
+
     if port == 587:
         with smtplib.SMTP(host, port, timeout=timeout) as smtp:
             smtp.starttls()
-            if user and password:
-                smtp.login(user, password)
+            _auth_smtp(smtp)
             smtp.sendmail(from_addr, recipients, message)
         return
     with smtplib.SMTP_SSL(host, port, timeout=timeout) as smtp:
-        if user and password:
-            smtp.login(user, password)
+        _auth_smtp(smtp)
         smtp.sendmail(from_addr, recipients, message)
 
 
@@ -522,10 +784,16 @@ def _get_email_config(account_id: str | None = None, owner: str = "") -> dict:
                     "imap_password": _decrypt(row.imap_password or ""),
                     "imap_starttls": bool(row.imap_starttls),
                     "from_address": row.from_address or row.imap_user or "",
+                    "oauth_provider": row.oauth_provider or "",
+                    "oauth_access_token": row.oauth_access_token or "",
+                    "oauth_refresh_token": row.oauth_refresh_token or "",
+                    "oauth_token_expiry": row.oauth_token_expiry or "",
+                    "display_name": row.display_name or "",
                 }
-                if not (cfg["smtp_host"] and cfg["smtp_user"] and cfg["smtp_password"]):
+                is_oauth = bool(cfg.get("oauth_provider"))
+                if not is_oauth and not (cfg["smtp_host"] and cfg["smtp_user"] and cfg["smtp_password"]):
                     logger.warning(f"SMTP not configured for account {row.name!r}")
-                if not (cfg["imap_host"] and cfg["imap_user"] and cfg["imap_password"]):
+                if not is_oauth and not (cfg["imap_host"] and cfg["imap_user"] and cfg["imap_password"]):
                     logger.warning(f"IMAP not configured for account {row.name!r}")
                 return cfg
         finally:
@@ -604,7 +872,13 @@ def _imap_connect(account_id: str | None = None, owner: str = ""):
         conn.sock.settimeout(_IMAP_TIMEOUT_SECONDS)
     except Exception:
         pass
-    conn.login(cfg["imap_user"], cfg["imap_password"])
+    if cfg.get("oauth_provider") == "google":
+        token = _get_valid_google_token(cfg.get("account_id"), cfg)
+        if not token:
+            raise RuntimeError("Google OAuth token unavailable — reconnect the account in Settings → Integrations")
+        conn.authenticate("XOAUTH2", lambda x: _xoauth2_bytes(cfg["imap_user"], token))
+    else:
+        conn.login(cfg["imap_user"], cfg["imap_password"])
     return conn
 
 
