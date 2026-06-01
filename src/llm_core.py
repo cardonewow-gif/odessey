@@ -460,6 +460,47 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
             cleaned.append(item)
     return cleaned
 
+
+def _normalize_conversation(messages: List[Dict]) -> List[Dict]:
+    """Coerce a message list into the user-first, alternating shape that strict
+    chat templates (e.g. Qwen's jinja, which raises "No user query found in
+    messages") require — without changing meaning.
+
+    The chat UI seeds a greeting as an ``assistant`` message and, when a turn
+    fails, can leave two ``user`` turns back-to-back. Both produce a sequence
+    these templates reject. This:
+      - keeps a single leading ``system`` message untouched,
+      - drops any assistant/tool turns that precede the first ``user`` turn,
+      - merges consecutive same-role text turns into one (joined by a blank
+        line), leaving tool-call/non-string turns alone.
+    """
+    if not messages:
+        return messages
+    out: List[Dict] = []
+    body = messages
+    if body[0].get("role") == "system":
+        out.append(body[0])
+        body = body[1:]
+    # Drop leading non-user turns (the seeded assistant greeting, stray tools).
+    start = 0
+    while start < len(body) and body[start].get("role") != "user":
+        start += 1
+    for msg in body[start:]:
+        prev = out[-1] if out else None
+        mergeable = (
+            prev is not None
+            and prev.get("role") == msg.get("role")
+            and isinstance(prev.get("content"), str)
+            and isinstance(msg.get("content"), str)
+            and "tool_calls" not in prev and "tool_calls" not in msg
+            and "tool_call_id" not in prev and "tool_call_id" not in msg
+        )
+        if mergeable:
+            out[-1] = {**prev, "content": f"{prev['content']}\n\n{msg['content']}".strip()}
+        else:
+            out.append(msg)
+    return out
+
 def _normalize_anthropic_url(url: str) -> str:
     """Ensure Anthropic URL points to /v1/messages."""
     url = url.rstrip("/")
@@ -548,6 +589,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         messages_copy = [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
     else:
         messages_copy = non_sys
+    messages_copy = _normalize_conversation(messages_copy)
 
     provider = _detect_provider(url)
     cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
@@ -661,6 +703,7 @@ async def llm_call_async(
         messages_copy = [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
     else:
         messages_copy = non_sys
+    messages_copy = _normalize_conversation(messages_copy)
 
     cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
     cached_response = _get_cached_response(cache_key)
@@ -765,6 +808,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         messages_copy = [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
     else:
         messages_copy = non_sys
+    messages_copy = _normalize_conversation(messages_copy)
 
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)
@@ -958,6 +1002,10 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     # can detect thinking-in-progress (some models output </think> but no <think>)
     _thinking_model = _supports_thinking(model)
     _first_content_sent = False
+    # Tracks whether the upstream produced any real output. If a 200 stream
+    # closes without an upstream [DONE] and nothing was emitted, that's almost
+    # always an upstream-side failure — surface it rather than ending silently.
+    _saw_content = False
 
     def _emit_tool_calls():
         """Build the tool_calls event string if any were accumulated."""
@@ -993,6 +1041,19 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                         if data.strip():
                             if data.startswith("{"):
                                 j = json.loads(data)
+                                # Some OpenAI-compatible servers (e.g. LM Studio)
+                                # return 200, open the stream, then emit an
+                                # {"error": ...} chunk when the request fails
+                                # mid-flight (a chat-template render error, OOM,
+                                # etc.). Surface it as an error event instead of
+                                # silently ignoring it — otherwise the UI spins
+                                # until the read timeout.
+                                if isinstance(j, dict) and j.get("error") and not j.get("choices"):
+                                    _e = j["error"]
+                                    _emsg = _e.get("message") if isinstance(_e, dict) else str(_e)
+                                    logger.warning(f"Upstream {_host_key(target_url)} streamed an error: {_emsg}")
+                                    yield f'event: error\ndata: {json.dumps({"error": _emsg or "Upstream error", "status": 502})}\n\n'
+                                    return
                                 # Usage chunk (from stream_options)
                                 _choices = j.get("choices") or []
                                 _delta0 = _choices[0].get("delta") if _choices else None
@@ -1006,6 +1067,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                         # Reasoning tokens (VLLM --reasoning-parser, e.g. Qwen3/DeepSeek-R1)
                                         reasoning = delta.get("reasoning_content") or ""
                                         if reasoning:
+                                            _saw_content = True
                                             yield f'data: {json.dumps({"delta": reasoning, "thinking": True})}\n\n'
                                         content = delta.get("content") or ""
                                         if content:
@@ -1016,6 +1078,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                             if _thinking_model and not _first_content_sent and content.lstrip().lower().startswith("</think"):
                                                 content = "<think>" + content
                                             _first_content_sent = True
+                                            _saw_content = True
                                             yield f'data: {json.dumps({"delta": content})}\n\n'
                                         # Native tool calls — accumulate across chunks
                                         for tc in delta.get("tool_calls") or []:
@@ -1034,9 +1097,11 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                                     yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _tc_acc[idx]["name"], "arg_delta": func["arguments"]})}\n\n'
                                 elif "text" in j:
                                     if j["text"]:
+                                        _saw_content = True
                                         yield f'data: {json.dumps({"delta": j["text"]})}\n\n'
                             else:
                                 if data.strip():
+                                    _saw_content = True
                                     yield f'data: {json.dumps({"delta": data})}\n\n'
                     except Exception as e:
                         logger.error(f"Error parsing stream data: {e}")
@@ -1046,6 +1111,15 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             tc_event = _emit_tool_calls()
             if tc_event:
                 yield tc_event
+            elif not _saw_content:
+                # The upstream returned 200, opened the stream, then closed it
+                # without emitting any content, tool calls, or a [DONE] of its
+                # own — almost always an upstream-side failure (e.g. a chat
+                # template that errored during render). Report it so the UI
+                # shows an error instead of an empty bubble / a hung spinner.
+                logger.warning(f"Upstream {_host_key(target_url)} closed the stream with no output")
+                yield f'event: error\ndata: {json.dumps({"error": f"{_host_key(target_url)} returned no output — the model or its prompt template likely errored (check the server log).", "status": 502})}\n\n'
+                return
             yield "data: [DONE]\n\n"
 
     except (httpx.ConnectError, httpx.ConnectTimeout) as e:
