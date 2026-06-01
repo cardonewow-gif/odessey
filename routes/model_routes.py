@@ -120,6 +120,17 @@ _PROVIDER_CURATED = {
     "xai": [
         "grok-4.3", "grok-4", "grok-4-fast", "grok-3", "grok-3-fast",
     ],
+    # Bedrock returns dozens of model + inference-profile IDs. Surface the
+    # popular text families up top; everything else falls into "extra".
+    # Entries match by prefix, so regional profiles (us./eu./apac.) and bare
+    # foundation IDs both bucket here.
+    "bedrock": [
+        "us.anthropic.claude", "eu.anthropic.claude", "apac.anthropic.claude", "anthropic.claude",
+        "us.amazon.nova", "amazon.nova",
+        "us.meta.llama", "meta.llama",
+        "us.deepseek", "deepseek.",
+        "us.mistral", "mistral.",
+    ],
 }
 
 # Map URL substrings → curated-list keys for providers whose _detect_provider()
@@ -135,6 +146,7 @@ _URL_TO_CURATED = {
     "generativelanguage.googleapis.com": "google",
     "api.x.ai": "xai",
     "openrouter.ai": "openrouter",
+    "bedrock-runtime": "bedrock",
     "ollama.com": "ollama",
 }
 
@@ -224,6 +236,16 @@ def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 1
     # Simple tool definition to test tool support
     _test_tools = [{"type": "function", "function": {"name": "test", "description": "Test tool", "parameters": {"type": "object", "properties": {}}}}] if with_tools else None
 
+    if provider == "bedrock":
+        from src import bedrock_client
+        try:
+            t0 = _time.time()
+            bedrock_client.converse(base, api_key, model_id, messages, 0.0, 5,
+                                    tools=_test_tools)
+            return {"status": "ok", "latency_ms": round((_time.time() - t0) * 1000)}
+        except Exception as e:
+            return {"status": "fail", "error": bedrock_client.friendly_error(e)[:120]}
+
     if provider == "anthropic":
         from src.llm_core import _normalize_anthropic_url, _build_anthropic_headers, _build_anthropic_payload
         target_url = _normalize_anthropic_url(base)
@@ -306,6 +328,13 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
     For Anthropic, queries their /v1/models API, falling back to hardcoded list."""
     from src.endpoint_resolver import resolve_url
     base = resolve_url(_normalize_base(base_url))
+    if _detect_provider(base) == "bedrock":
+        try:
+            from src.bedrock_client import list_models
+            return list_models(base, api_key, timeout=timeout)
+        except Exception as e:
+            logger.warning(f"Bedrock model listing failed: {e}")
+            return []
     if _detect_provider(base) == "anthropic":
         # Try Anthropic's /v1/models endpoint first
         url = _anthropic_api_root(base) + "/v1/models"
@@ -571,7 +600,8 @@ def setup_model_routes(model_discovery):
                 except Exception:
                     pass
             model_ids = [m for m in model_ids if m not in hidden]
-            # Build correct URL based on provider
+            # Build correct URL based on provider (handles anthropic, ollama,
+            # bedrock, and OpenAI-compatible bases).
             chat_url = build_chat_url(base)
             category = _classify_endpoint(base)
 
