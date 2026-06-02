@@ -1041,7 +1041,7 @@ def test_dns_rebinding_pinned_transport_dials_pinned_ip(monkeypatch):
     # with a fake hostname so we can verify the host header is sent
     # while the TCP connect goes to the pinned IP.
     pinned_ip = _ipaddr.ip_address("127.0.0.1")
-    transport = content._PinnedTransport(pinned_ip, trust_env=False, http2=False)
+    transport = content._PinnedTransport(pinned_ip)
 
     req = _httpx.Request(
         "GET",
@@ -1087,7 +1087,7 @@ def test_dns_rebinding_pinned_transport_preserves_url_netloc(monkeypatch):
             pass
 
     pinned_ip = _ipaddr.ip_address("93.184.216.34")
-    transport = content._PinnedTransport(pinned_ip, trust_env=False, http2=False)
+    transport = content._PinnedTransport(pinned_ip)
     transport._pool = _RecordingPool()
 
     req = _httpx.Request("GET", "https://example.com/some/path?q=1")
@@ -1135,15 +1135,27 @@ def test_dns_rebinding_redirect_re_resolves_per_hop(monkeypatch):
     assert seen == ["http://public.example/start", "http://private.example/secret"], seen
 
 
-def test_dns_rebinding_transport_uses_public_httpcore_api(monkeypatch):
-    """Static guard: ``_PinnedTransport`` must not read private
-    ``httpcore.ConnectionPool`` attributes (``_ssl_context``,
-    ``_max_connections``, etc.). Catches the v1 fragility that
-    reached into pool internals.
+def test_dns_rebinding_transport_uses_public_apis(monkeypatch):
+    """Static guard: ``_PinnedTransport`` must use only the public
+    ``httpx.BaseTransport`` / ``httpcore`` APIs. No subclassing of
+    ``httpx.HTTPTransport`` (whose ``_pool`` slot we'd have to
+    overwrite), no reads of private ``httpcore.ConnectionPool``
+    attributes, and no imports from ``httpx._transports``.
     """
     from src.search import content
 
     import inspect
+
+    # 1) Subclass check: must be BaseTransport, not HTTPTransport.
+    mro_names = [c.__name__ for c in content._PinnedTransport.__mro__]
+    assert "BaseTransport" in mro_names, mro_names
+    assert "HTTPTransport" not in mro_names, (
+        "_PinnedTransport subclasses httpx.HTTPTransport. Subclass "
+        "httpx.BaseTransport instead and build the pool from scratch "
+        "with the public httpcore.ConnectionPool API."
+    )
+
+    # 2) No reads of private httpcore.ConnectionPool attrs.
     src = inspect.getsource(content._PinnedTransport)
     forbidden = (
         "_ssl_context",
@@ -1152,11 +1164,20 @@ def test_dns_rebinding_transport_uses_public_httpcore_api(monkeypatch):
         "_keepalive_expiry",
         "_http1",
         "_http2",
+        "_network_backend",
     )
     leaked = [name for name in forbidden if name in src]
     assert not leaked, (
         f"_PinnedTransport reads private httpcore.ConnectionPool attrs: {leaked}. "
-        "Build the replacement pool from the public httpcore.ConnectionPool API "
-        "instead."
+        "Build the pool from the public httpcore.ConnectionPool API instead."
+    )
+
+    # 3) No imports from httpx's private transport module.
+    module_src = inspect.getsource(content)
+    forbidden_imports = ("from httpx._transports", "import httpx._transports")
+    leaked_imports = [s for s in forbidden_imports if s in module_src]
+    assert not leaked_imports, (
+        f"content.py imports from httpx's private transport module: {leaked_imports}. "
+        "Use only the public httpx and httpcore APIs."
     )
 

@@ -10,7 +10,7 @@ import logging
 import socket
 import ssl
 from datetime import datetime, timedelta
-from typing import List
+from typing import Iterable, List, cast
 from urllib.parse import urljoin, urlparse
 
 import httpcore
@@ -136,39 +136,92 @@ class _PinnedBackend(httpcore.NetworkBackend):
         return self._real.sleep(seconds)
 
 
-class _PinnedTransport(httpx.HTTPTransport):
-    """HTTPTransport that pins every TCP connect to a pre-resolved IP.
+# Map httpcore exception classes to their httpx equivalents. Built
+# once at import time from the public exception classes; avoids any
+# import of httpx's private transport machinery. httpcore's
+# ``ConnectionNotAvailable`` is a pool-internal signal (the pool will
+# close and retry on its own) — we never expect to see it surface to
+# a transport caller, so it has no httpx counterpart here.
+_HTTPCORE_TO_HTTPX_EXC = {
+    httpcore.ConnectError: httpx.ConnectError,
+    httpcore.ConnectTimeout: httpx.ConnectTimeout,
+    httpcore.LocalProtocolError: httpx.LocalProtocolError,
+    httpcore.NetworkError: httpx.NetworkError,
+    httpcore.PoolTimeout: httpx.PoolTimeout,
+    httpcore.ProtocolError: httpx.ProtocolError,
+    httpcore.ProxyError: httpx.ProxyError,
+    httpcore.ReadError: httpx.ReadError,
+    httpcore.ReadTimeout: httpx.ReadTimeout,
+    httpcore.RemoteProtocolError: httpx.RemoteProtocolError,
+    httpcore.TimeoutException: httpx.TimeoutException,
+    httpcore.UnsupportedProtocol: httpx.UnsupportedProtocol,
+    httpcore.WriteError: httpx.WriteError,
+    httpcore.WriteTimeout: httpx.WriteTimeout,
+}
 
-    Lets the parent build a default pool, then immediately replaces it
-    with one whose ``network_backend`` is a ``_PinnedBackend``. The
-    replacement pool is built from the public ``httpcore.ConnectionPool``
-    API — no reads of private ``ConnectionPool`` attributes, so the
-    shape is stable across httpcore versions.
+
+class _PinnedTransport(httpx.BaseTransport):
+    """Transport that pins every TCP connect to a pre-resolved IP.
+
+    Uses only the public ``httpcore`` and ``httpx`` APIs — no
+    subclassing of ``httpx.HTTPTransport``, no reads of private
+    ``httpcore.ConnectionPool`` attributes, no imports from
+    ``httpx._transports``. The URL is passed through unchanged so SNI
+    / vhost work as if httpx had been given the hostname directly;
+    only the TCP destination is pinned, closing the DNS-rebinding
+    TOCTOU between the SSRF check and the connect.
     """
 
-    def __init__(self, ip: ipaddress._BaseAddress, **kw):
-        super().__init__(**kw)
-        verify = kw.get("verify", True)
-        if isinstance(verify, ssl.SSLContext):
-            ssl_context = verify
-        else:
-            ssl_context = ssl.create_default_context()
-        limits = kw.get("limits", httpx.Limits())
-        replacement = httpcore.ConnectionPool(
-            ssl_context=ssl_context,
-            max_connections=limits.max_connections,
-            max_keepalive_connections=limits.max_keepalive_connections,
-            keepalive_expiry=limits.keepalive_expiry,
-            http1=kw.get("http1", True),
-            http2=kw.get("http2", False),
-            uds=kw.get("uds"),
-            local_address=kw.get("local_address"),
-            retries=kw.get("retries", 0),
-            socket_options=kw.get("socket_options"),
+    def __init__(self, ip: ipaddress._BaseAddress, *, http2: bool = False):
+        self._pool = httpcore.ConnectionPool(
+            ssl_context=ssl.create_default_context(),
+            http1=True,
+            http2=http2,
             network_backend=_PinnedBackend(ip),
         )
+
+    def __enter__(self):
+        self._pool.__enter__()
+        return self
+
+    def __exit__(self, exc_type=None, exc_value=None, traceback=None) -> None:
+        self._pool.__exit__(exc_type, exc_value, traceback)
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        httpcore_req = httpcore.Request(
+            method=request.method,
+            url=httpcore.URL(
+                scheme=request.url.raw_scheme,
+                host=request.url.raw_host,
+                port=request.url.port,
+                target=request.url.raw_path,
+            ),
+            headers=request.headers.raw,
+            content=request.stream,
+            extensions=request.extensions,
+        )
+        try:
+            httpcore_resp = self._pool.handle_request(httpcore_req)
+            # Eager materialisation matches the original
+            # ``response.text`` usage in fetch_webpage_content. The
+            # sync pool's stream is a plain Iterable[bytes] despite
+            # the httpcore type hint unioning the async variant.
+            content = b"".join(cast(Iterable[bytes], httpcore_resp.stream))
+        except Exception as exc:
+            mapped = _HTTPCORE_TO_HTTPX_EXC.get(type(exc))
+            if mapped is not None:
+                raise mapped(str(exc)) from exc
+            raise
+
+        return httpx.Response(
+            status_code=httpcore_resp.status,
+            headers=httpcore_resp.headers,
+            content=content,
+            extensions=httpcore_resp.extensions,
+        )
+
+    def close(self) -> None:
         self._pool.close()
-        self._pool = replacement
 
 
 def _get_public_url(url: str, headers: dict, timeout: int, max_redirects: int = 5) -> httpx.Response:
