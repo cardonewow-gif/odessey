@@ -11,6 +11,7 @@ from routes.cookbook_helpers import (
     _append_serve_exit_code_lines,
     _append_serve_preflight_exit_lines,
     _local_tooling_path_export,
+    _pip_build_env_exports,
     _pip_install_attempt,
     _pip_install_fallback_chain,
     _ollama_bind_from_cmd,
@@ -86,6 +87,18 @@ def test_local_tooling_path_export_preserves_spaces_and_expands_path():
     line = _local_tooling_path_export("/Users/John Smith/.venv/bin/python3")
     assert line == 'export PATH="/Users/John Smith/.venv/bin:$PATH"'
     assert line.endswith(':$PATH"')  # $PATH stays expandable in double quotes
+
+
+def test_pip_build_env_exports_redirects_cache_for_local_runs():
+    line = _pip_build_env_exports(local=True)
+    assert "PIP_CACHE_DIR" in line
+    assert "TMPDIR" in line
+    assert "pip-cache" in line
+    assert "mkdir -p" in line
+
+
+def test_pip_build_env_exports_skipped_for_remote_runs():
+    assert _pip_build_env_exports(local=False) == ""
 
 
 def test_pip_install_fallback_chain_prefers_venv_safe_install():

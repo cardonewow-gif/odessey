@@ -76,6 +76,13 @@ done
 # nvcc" even when the GPU itself is fully visible to the container.
 export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 
+# Pip/wheel build caches default to ~/.cache/pip and $TMPDIR under /tmp.
+# On hosts where $HOME is a small partition this can exhaust disk during
+# Cookbook dependency installs. Redirect to the bind-mounted data volume.
+mkdir -p /app/data/pip-cache /app/data/tmp 2>/dev/null || true
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/app/data/pip-cache}"
+export TMPDIR="${TMPDIR:-/app/data/tmp}"
+
 # Make Cookbook-installed Python CLIs visible after `pip install --user`.
 # vLLM and helper scripts land here because /app is the non-root user's HOME.
 export PATH="/app/.local/bin:$PATH"

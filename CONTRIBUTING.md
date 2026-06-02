@@ -25,6 +25,9 @@ Manual development uses Python 3.11+:
 ```bash
 python3 -m venv venv
 source venv/bin/activate
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-./data/pip-cache}"
+export TMPDIR="${TMPDIR:-./data/tmp}"
+mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
 pip install -r requirements.txt
 python -m uvicorn app:app --host 0.0.0.0 --port 7000
 ```

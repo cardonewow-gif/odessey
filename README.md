@@ -72,6 +72,9 @@ git clone https://github.com/pewdiepie-archdaemon/odysseus.git
 cd odysseus
 python3 -m venv venv
 source venv/bin/activate
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-./data/pip-cache}"
+export TMPDIR="${TMPDIR:-./data/tmp}"
+mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
 pip install -r requirements.txt
 python setup.py
 python -m uvicorn app:app --host 127.0.0.1 --port 7000
@@ -120,7 +123,26 @@ unless you opt in.
 **Cookbook storage in Docker.** Downloads live in `./data/huggingface`
 (`~/.cache/huggingface` in the container). Cookbook-installed Python CLIs and
 serve engines live in `./data/local` (`~/.local` in the container), so they
-survive container recreation.
+survive container recreation. Pip wheel/build caches and temp files go to
+`./data/pip-cache` and `./data/tmp` (not `$HOME`), which avoids filling a small
+home partition during **Cookbook → Dependencies** installs.
+
+**Pip install runs out of disk on `$HOME`.** Odysseus does not write app data
+into your home directory, but `pip` and wheel builds cache under
+`~/.cache/pip` and `$TMPDIR` by default. If you see `No space left on device`
+under `/home/.../.cache/pip` while installing requirements or Cookbook
+dependencies, redirect those paths to a folder with space before retrying:
+
+```bash
+export PIP_CACHE_DIR=/path/with/space/pip-cache
+export TMPDIR=/path/with/space/tmp
+mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
+pip install -r requirements.txt   # or rerun the Cookbook dependency install
+```
+
+Docker Compose sets these to `./data/pip-cache` and `./data/tmp` automatically.
+For a remote Cookbook server with the same issue, set the same variables in
+**Cookbook → Settings → env prefix** (or in that server's shell profile).
 
 **Remote servers.** In **Cookbook -> Settings -> Servers**, generate the
 Odysseus SSH key and add the public key to the remote server's

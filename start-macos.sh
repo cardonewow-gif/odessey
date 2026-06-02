@@ -135,6 +135,10 @@ if [ ! -d venv ]; then
 fi
 VENV_PY="./venv/bin/python3"
 echo "▶ Installing Python packages (first run downloads a few — can take a few minutes)…"
+PIP_CACHE_DIR="${PIP_CACHE_DIR:-$REPO_DIR/data/pip-cache}"
+TMPDIR="${TMPDIR:-$REPO_DIR/data/tmp}"
+mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
+export PIP_CACHE_DIR TMPDIR
 "$VENV_PY" -m pip install --quiet --upgrade pip
 # Not --quiet: this is the slow step, so show progress (and any real errors).
 "$VENV_PY" -m pip install -r requirements.txt

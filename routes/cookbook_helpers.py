@@ -148,6 +148,50 @@ def _local_tooling_path_export(executable: str) -> str:
     return f'export PATH="{esc}:$PATH"'
 
 
+def _odysseus_data_dir() -> str:
+    """Return the Odysseus data directory for redirecting pip build caches."""
+    explicit = (os.environ.get("ODYSSEUS_DATA_DIR") or "").strip()
+    if explicit:
+        return explicit
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+
+
+def _bash_double_quoted_path(path: str) -> str:
+    """Escape a filesystem path for use inside a bash double-quoted string."""
+    path = path.replace("\\", "/")
+    return (
+        path.replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("`", "\\`")
+    )
+
+
+def _pip_build_env_exports(*, local: bool = True) -> str:
+    """Bash snippet redirecting pip wheel cache and build temp away from $HOME.
+
+    Pip and wheel builds default to ``~/.cache/pip`` and ``$TMPDIR`` (often
+    under ``/tmp`` on the home filesystem). On hosts where ``$HOME`` is a small
+    partition this can fail with "No space left on device" during Cookbook
+    dependency installs or manual ``pip install -r requirements.txt``. See #1219.
+
+    Only applied for local Cookbook runners — remote SSH scripts keep the
+    remote host's defaults unless the operator sets ``PIP_CACHE_DIR`` /
+    ``TMPDIR`` in the environment or Cookbook env prefix.
+    """
+    if not local:
+        return ""
+    data_dir = _odysseus_data_dir()
+    cache_dir = (os.environ.get("PIP_CACHE_DIR") or "").strip() or os.path.join(data_dir, "pip-cache")
+    tmp_dir = (os.environ.get("TMPDIR") or "").strip() or os.path.join(data_dir, "tmp")
+    cache_esc = _bash_double_quoted_path(cache_dir)
+    tmp_esc = _bash_double_quoted_path(tmp_dir)
+    return (
+        f'mkdir -p "{cache_esc}" "{tmp_esc}" 2>/dev/null; '
+        f'export PIP_CACHE_DIR="${{PIP_CACHE_DIR:-{cache_esc}}}"; '
+        f'export TMPDIR="${{TMPDIR:-{tmp_esc}}}"'
+    )
+
+
 def _pip_install_attempt(pip_cmd: str) -> str:
     """Wrap a single pip install command so its exit status survives the
     fallback chain and its stderr is visible in the tmux log on failure.

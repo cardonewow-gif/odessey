@@ -38,7 +38,7 @@ from routes.cookbook_helpers import (
     _ps_squote, _bash_squote, _validate_serve_cmd, _parse_serve_phase,
     _safe_env_prefix, _local_tooling_path_export, _append_serve_preflight_exit_lines,
     _append_serve_exit_code_lines, _append_llama_cpp_linux_accel_build_lines, _cached_model_scan_script,
-    _ollama_bind_from_cmd, _pip_install_fallback_chain, _venv_safe_local_pip_install_cmd,
+    _ollama_bind_from_cmd, _pip_build_env_exports, _pip_install_fallback_chain, _venv_safe_local_pip_install_cmd,
     ModelDownloadRequest, ServeRequest,
 )
 
@@ -433,6 +433,10 @@ def setup_cookbook_routes() -> APIRouter:
         # No script/tee needed — we'll use tmux capture-pane to read output
         lines = ["#!/bin/bash"]
         lines.extend(_user_shell_path_bootstrap())
+        if not req.remote_host and req.platform != "windows":
+            pip_env = _pip_build_env_exports(local=True)
+            if pip_env:
+                lines.append(pip_env)
         if req.hf_token:
             lines.append(f"export HF_TOKEN='{_bash_squote(req.hf_token)}'")
         # Ensure pip-user scripts (e.g. hf CLI installed via --user) are on PATH
@@ -923,6 +927,10 @@ def setup_cookbook_routes() -> APIRouter:
             # ── Linux/Termux: bash + tmux (existing flow) ──
             runner_lines = ["#!/bin/bash"]
             runner_lines.extend(_user_shell_path_bootstrap())
+            if not remote:
+                pip_env = _pip_build_env_exports(local=True)
+                if pip_env:
+                    runner_lines.append(pip_env)
             runner_lines.append('ODYSSEUS_PREFLIGHT_EXIT=""')
             # Put Odysseus's own venv bin on PATH (local runs only) so the serve
             # shell resolves the bundled python3/hf, mirroring the download flow.

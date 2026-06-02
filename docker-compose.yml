@@ -32,6 +32,10 @@ services:
       - CHROMADB_HOST=chromadb
       - CHROMADB_PORT=8000
       - DATABASE_URL=${DATABASE_URL:-sqlite:///./data/app.db}
+      # Keep pip wheel/build caches off $HOME — small home partitions can
+      # otherwise fail Cookbook dependency installs (#1219).
+      - PIP_CACHE_DIR=${PIP_CACHE_DIR:-/app/data/pip-cache}
+      - TMPDIR=${TMPDIR:-/app/data/tmp}
       - AUTH_ENABLED=${AUTH_ENABLED:-true}
       - LOCALHOST_BYPASS=${LOCALHOST_BYPASS:-false}
       - ODYSSEUS_ADMIN_USER=${ODYSSEUS_ADMIN_USER:-admin}
