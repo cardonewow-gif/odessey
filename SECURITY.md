@@ -23,6 +23,35 @@ Security fixes are handled on the default branch until formal releases are cut.
 - Treat shell, model-serving, MCP, email, calendar, and vault features as privileged admin functionality.
 - Common internal-only ports are Odysseus `7000`, SearXNG `8080`, ntfy `8091`, ChromaDB `8100`, Ollama `11434`, and local model/provider APIs such as `8000-8020`.
 
+## Optional Sandboxed Code Execution
+
+By default the agent's `bash` and `python` tools run **directly on the host**. For defense-in-depth (untrusted prompts, shared deployments) you can run them inside a hardened throwaway container instead:
+
+```bash
+ODYSSEUS_SANDBOX=1            # opt in; requires podman or docker on PATH
+```
+
+Scope and behavior:
+
+- **Affects the `bash` and `python` tools only** — *not* other agent tools (file read/write, web, email, MCP, etc.). Those still run with their normal host privileges; sandboxing here is about arbitrary code execution, not a general capability jail.
+- **Enabling it changes the execution environment for bash/python.** Code runs inside the container image (default `python:3.12-slim`), not on the host: a different filesystem, different installed packages/interpreters, `--network none` (no network), read-only root with a writable `/tmp` tmpfs, all capabilities dropped, `no-new-privileges`, non-root (`nobody`), and memory/CPU/pid caps. Host files are **not** bind-mounted in. Scripts that expect host tools, host files, or network access will behave differently.
+- **Fails closed.** If `ODYSSEUS_SANDBOX=1` but no container runtime is found, bash/python **refuse to run** (clear error, exit 126) rather than silently executing on the host. A security toggle must not downgrade itself.
+- **Explicit host fallback.** If you want "prefer the sandbox, but fall back to the host when no runtime is available", opt in separately with `ODYSSEUS_SANDBOX_FALLBACK=host`. Enabling the sandbox alone never implies host fallback.
+- Tunables: `ODYSSEUS_SANDBOX_{IMAGE,MEMORY,CPUS,PIDS,TMPFS}`.
+
+Verify the isolation is real (with `ODYSSEUS_SANDBOX=1` and a runtime installed):
+
+```bash
+# network is unreachable from inside the sandbox (expect a failure, not 200)
+podman run --rm --network none --read-only --tmpfs /tmp python:3.12-slim \
+  python -I -c "import urllib.request as u; u.urlopen('https://example.com', timeout=5)"
+# -> urllib.error.URLError / OSError (Errno 101, Network is unreachable)
+
+# root filesystem is read-only (expect OSError: [Errno 30] Read-only file system)
+podman run --rm --read-only --tmpfs /tmp python:3.12-slim \
+  python -I -c "open('/etc/pwned','w').write('x')"
+```
+
 ## Publishing A Fork
 
 Before pushing a public fork, run:

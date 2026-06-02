@@ -2,51 +2,67 @@
 
 bash/python tool calls run on the host by default (unchanged). When
 ODYSSEUS_SANDBOX=1 and a container runtime exists, they run inside a hardened
-throwaway container instead. These tests lock in: off-by-default, the runtime
-gate, and the hardening flags.
+throwaway container instead. When sandboxing is required but no runtime is
+available, code execution FAILS CLOSED rather than silently running on the host.
+
+These tests patch the module-level sandbox flags directly (rather than reloading
+the module) so they are order-independent in the full suite.
 """
 
-import importlib
-import os
+import asyncio
+
+import pytest
 
 import src.tool_execution as te
 
 
-def _reload(**env):
-    for k, v in env.items():
-        if v is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = v
-    return importlib.reload(te)
+def _set(monkeypatch, *, enabled, fallback_host=False, runtime=None):
+    """Configure the sandbox flags and the runtime probe for one test.
+
+    `runtime` is the value `shutil.which` should return for podman/docker:
+    None = nothing on PATH; a callable = used as-is; a str = that path for any.
+    """
+    monkeypatch.setattr(te, "SANDBOX_ENABLED", enabled)
+    monkeypatch.setattr(te, "SANDBOX_FALLBACK_HOST", fallback_host)
+    if callable(runtime):
+        which = runtime
+    else:
+        which = lambda x: runtime
+    monkeypatch.setattr(te._shutil, "which", which)
 
 
 def test_sandbox_off_by_default(monkeypatch):
-    """No env var -> no sandbox, even if podman is on PATH (opt-in only)."""
-    monkeypatch.setattr(te._shutil, "which", lambda x: "/usr/bin/podman")
-    m = _reload(ODYSSEUS_SANDBOX=None)
-    monkeypatch.setattr(m._shutil, "which", lambda x: "/usr/bin/podman")
-    assert m._sandbox_runtime() is None
+    """Disabled -> None, even if podman is on PATH (opt-in only)."""
+    _set(monkeypatch, enabled=False, runtime="/usr/bin/podman")
+    assert te._sandbox_runtime() is None
 
 
-def test_sandbox_needs_a_runtime(monkeypatch):
-    """Enabled but no podman/docker -> None (falls back to host, no crash)."""
-    m = _reload(ODYSSEUS_SANDBOX="1")
-    monkeypatch.setattr(m._shutil, "which", lambda x: None)
-    assert m._sandbox_runtime() is None
+def test_sandbox_fails_closed_without_runtime(monkeypatch):
+    """Enabled but no podman/docker and no host-fallback opt-in -> FAIL CLOSED:
+    raise SandboxUnavailable rather than silently downgrade to host execution."""
+    _set(monkeypatch, enabled=True, fallback_host=False, runtime=None)
+    with pytest.raises(te.SandboxUnavailable):
+        te._sandbox_runtime()
+
+
+def test_sandbox_host_fallback_is_opt_in(monkeypatch):
+    """ODYSSEUS_SANDBOX_FALLBACK=host re-enables host execution explicitly
+    (the only way enabling the sandbox is allowed to run on the host)."""
+    _set(monkeypatch, enabled=True, fallback_host=True, runtime=None)
+    assert te._sandbox_runtime() is None
 
 
 def test_sandbox_picks_podman_then_docker(monkeypatch):
-    m = _reload(ODYSSEUS_SANDBOX="1")
-    monkeypatch.setattr(m._shutil, "which", lambda x: "/usr/bin/" + x if x == "podman" else None)
-    assert m._sandbox_runtime() == "podman"
-    monkeypatch.setattr(m._shutil, "which", lambda x: "/usr/bin/" + x if x == "docker" else None)
-    assert m._sandbox_runtime() == "docker"
+    _set(monkeypatch, enabled=True,
+         runtime=lambda x: "/usr/bin/" + x if x == "podman" else None)
+    assert te._sandbox_runtime() == "podman"
+    monkeypatch.setattr(te._shutil, "which",
+                        lambda x: "/usr/bin/" + x if x == "docker" else None)
+    assert te._sandbox_runtime() == "docker"
 
 
 def test_wrapper_has_hardening_flags():
-    m = _reload(ODYSSEUS_SANDBOX="1")
-    argv = m._wrap_in_sandbox("podman", ["python", "-I", "-c", "print(1)"])
+    argv = te._wrap_in_sandbox("podman", ["python", "-I", "-c", "print(1)"])
     joined = " ".join(argv)
     assert argv[:3] == ["podman", "run", "--rm"]
     assert "--network none" in joined          # no network by default
@@ -60,17 +76,36 @@ def test_wrapper_has_hardening_flags():
 
 
 def test_wrapper_optional_network():
-    m = _reload(ODYSSEUS_SANDBOX="1")
-    off = " ".join(m._wrap_in_sandbox("podman", ["bash", "-lc", "x"]))
-    on = " ".join(m._wrap_in_sandbox("podman", ["bash", "-lc", "x"], network=True))
+    off = " ".join(te._wrap_in_sandbox("podman", ["bash", "-lc", "x"]))
+    on = " ".join(te._wrap_in_sandbox("podman", ["bash", "-lc", "x"], network=True))
     assert "--network none" in off
     assert "--network bridge" in on
 
 
-def _restore():
-    os.environ.pop("ODYSSEUS_SANDBOX", None)
-    importlib.reload(te)
+def test_blocked_sandbox_never_runs_code_on_host(monkeypatch):
+    """The core guarantee pewds asked for: ODYSSEUS_SANDBOX=1 + no runtime =
+    NO host execution. The bash/python tool path returns a fail-closed error
+    (exit 126) and never spawns a host process."""
+    _set(monkeypatch, enabled=True, fallback_host=False, runtime=None)
+
+    async def _boom(*a, **k):
+        raise AssertionError("host subprocess spawned despite required-but-unavailable sandbox")
+
+    monkeypatch.setattr(te.asyncio, "create_subprocess_shell", _boom)
+    monkeypatch.setattr(te.asyncio, "create_subprocess_exec", _boom)
+
+    for tool in ("bash", "python"):
+        res = asyncio.run(te._direct_fallback(tool, "echo this-must-not-run"))
+        assert res["exit_code"] == 126, res
+        assert "fail closed" in res["error"].lower()
 
 
-def teardown_module(module):
-    _restore()
+def test_non_code_tools_unaffected_when_sandbox_unavailable(monkeypatch, tmp_path):
+    """Sandboxing covers code execution only — read_file/write_file must still
+    work when the sandbox is required but unavailable (they don't run code)."""
+    _set(monkeypatch, enabled=True, fallback_host=False, runtime=None)
+    p = tmp_path / "note.txt"
+    res = asyncio.run(te._direct_fallback("write_file", f"{p}\nhello"))
+    assert res["exit_code"] == 0, res
+    res = asyncio.run(te._direct_fallback("read_file", str(p)))
+    assert "hello" in res["output"]
