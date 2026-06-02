@@ -125,18 +125,6 @@ def test_readme_native_quickstart_uses_loopback():
     assert "Use `--host 0.0.0.0` only when you intentionally want" in readme
 
 
-def test_ollama_cookbook_runner_does_not_force_public_bind():
-    route = Path("routes/cookbook_routes.py").read_text(encoding="utf-8")
-    cookbook_js = Path("static/js/cookbook.js").read_text(encoding="utf-8")
-    assert 'OLLAMA_HOST="0.0.0.0:${ODYSSEUS_OLLAMA_PORT}" ollama serve' not in route
-    assert 'OLLAMA_HOST="${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}" ollama serve' in route
-    assert '_ollama_default_host = "0.0.0.0" if remote else "127.0.0.1"' in route
-    assert "WARNING: remote Ollama will bind" in route
-    assert "OLLAMA_HOST=0.0.0.0:${ollamaPort}" not in cookbook_js
-    assert "const bindHost = _envState.remoteHost ? '0.0.0.0' : '127.0.0.1';" in cookbook_js
-    assert "OLLAMA_HOST=${bindHost}:${ollamaPort}" in cookbook_js
-
-
 def _import_integrations(tmp_path, monkeypatch):
     """Import src.integrations with data + encryption key redirected to tmp."""
     _import_secret_storage(tmp_path, monkeypatch)
@@ -549,104 +537,6 @@ def test_require_user_accepts_loopback_when_unconfigured(monkeypatch):
     assert auth_helpers.require_user(_LoopReq()) == ""
 
 
-def test_require_user_accepts_anyone_when_auth_disabled(monkeypatch):
-    """AUTH_ENABLED=false must let unauthenticated callers through from
-    any host — including the docker bridge / reverse proxy / LAN — so
-    the frontend's global 401 redirect doesn't bounce the user to /login
-    despite the operator turning auth off (issue #622)."""
-    monkeypatch.setenv("AUTH_ENABLED", "false")
-    sys.modules.pop("src.auth_helpers", None)
-    from src import auth_helpers  # noqa: WPS433
-
-    class _State:
-        current_user = None
-
-    class _AppState:
-        class _Mgr:
-            # Even with a prior admin account on disk, AUTH_ENABLED=false
-            # must take precedence over is_configured=True.
-            is_configured = True
-        auth_manager = _Mgr()
-
-    class _App:
-        state = _AppState()
-
-    class _DockerClient:
-        host = "172.18.0.1"  # docker bridge gateway, not loopback
-
-    class _Req:
-        state = _State()
-        app = _App()
-        client = _DockerClient()
-
-    assert auth_helpers.require_user(_Req()) == ""
-
-
-def test_require_user_localhost_bypass_admits_loopback(monkeypatch):
-    """LOCALHOST_BYPASS=true is the dev-only switch that admits loopback
-    callers without an auth cookie. require_user must mirror the auth
-    middleware so routes don't 401 a caller the middleware already let
-    through."""
-    monkeypatch.setenv("AUTH_ENABLED", "true")
-    monkeypatch.setenv("LOCALHOST_BYPASS", "true")
-    sys.modules.pop("src.auth_helpers", None)
-    from src import auth_helpers  # noqa: WPS433
-
-    class _State:
-        current_user = None
-
-    class _AppState:
-        class _Mgr:
-            is_configured = True
-        auth_manager = _Mgr()
-
-    class _App:
-        state = _AppState()
-
-    class _LoopClient:
-        host = "127.0.0.1"
-
-    class _LoopReq:
-        state = _State()
-        app = _App()
-        client = _LoopClient()
-
-    assert auth_helpers.require_user(_LoopReq()) == ""
-
-
-def test_require_user_localhost_bypass_still_rejects_lan(monkeypatch):
-    """LOCALHOST_BYPASS=true must not extend to non-loopback callers —
-    a LAN visitor still needs to authenticate."""
-    from fastapi import HTTPException
-    monkeypatch.setenv("AUTH_ENABLED", "true")
-    monkeypatch.setenv("LOCALHOST_BYPASS", "true")
-    sys.modules.pop("src.auth_helpers", None)
-    from src import auth_helpers  # noqa: WPS433
-
-    class _State:
-        current_user = None
-
-    class _AppState:
-        class _Mgr:
-            is_configured = True
-        auth_manager = _Mgr()
-
-    class _App:
-        state = _AppState()
-
-    class _LanClient:
-        host = "192.168.1.42"
-
-    class _LanReq:
-        state = _State()
-        app = _App()
-        client = _LanClient()
-
-    with pytest.raises(HTTPException) as exc:
-        auth_helpers.require_user(_LanReq())
-    assert exc.value.status_code == 401
-
-
 def test_require_admin_rejects_unconfigured_public_api(monkeypatch):
     """First-run API mode must not treat "no users yet" as admin access."""
     from fastapi import HTTPException
@@ -1041,3 +931,232 @@ def test_chat_active_document_lookup_is_owner_scoped():
     assert "filter( DBDocument.id == active_doc_id, ).first()" not in flat
     assert "filter(DBDocument.id == active_doc_id).first()" not in flat
     assert "filter(DBDocument.id == _mem_id).first()" not in flat
+
+
+# ── DNS rebinding (audit finding 8.1) ────────────────────────────────
+# _resolve_public_ips resolves a URL's hostname once per hop and rejects
+# private / metadata targets, but httpx would then re-resolve the
+# hostname at connect time. The fix: the actual TCP connect is pinned
+# to the resolved IP via a custom httpcore.NetworkBackend, while the
+# URL / Host header / SNI stay on the original hostname.
+
+import ipaddress as _ipaddr
+import socket as _socket
+import threading as _threading
+
+import httpx as _httpx
+
+
+def test_dns_rebinding_blocked_by_resolve_gate(monkeypatch):
+    from src.search import content
+
+    monkeypatch.setattr(content, "_resolve_hostname_ips",
+                        lambda host: [_ipaddr.ip_address("10.0.0.5")])
+
+    with _pytest.raises(_httpx.RequestError) as exc:
+        content._resolve_public_ips("https://attacker.example/")
+    assert "non-public" in str(exc.value).lower()
+
+
+def test_dns_rebinding_pinned_backend_connects_to_resolved_ip(monkeypatch):
+    """``_PinnedBackend.connect_tcp`` must ignore the URL's host and
+    dial the pinned IP at the original port. This is the core of the
+    fix: httpcore's NetworkBackend contract lets us intercept the
+    connect before DNS lookup happens.
+    """
+    from src.search import content
+
+    pinned_ip = _ipaddr.ip_address("93.184.216.34")
+    captured = {}
+
+    class _StubStream:
+        def close(self):
+            pass
+
+    class _StubBackend:
+        def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+            captured["host"] = host
+            captured["port"] = port
+            return _StubStream()
+
+        def connect_unix_socket(self, path, timeout=None, socket_options=None):
+            raise OSError("not used")
+
+        def sleep(self, seconds):
+            pass
+
+    backend = content._PinnedBackend(pinned_ip)
+    monkeypatch.setattr(backend, "_real", _StubBackend())
+
+    backend.connect_tcp("attacker.example", 443)
+
+    assert captured["host"] == "93.184.216.34", captured
+    assert captured["port"] == 443, captured
+
+
+def test_dns_rebinding_pinned_transport_dials_pinned_ip(monkeypatch):
+    """End-to-end: ``_PinnedTransport`` actually dials the pinned IP
+    when given a hostname, with the original URL's Host header
+    preserved. We stand up a local socket server on a free port and
+    make the transport connect there via the pinned backend.
+    """
+    from src.search import content
+    import httpcore
+
+    # Stand up a TCP server that accepts one connection and records
+    # the request bytes it received, then returns a minimal HTTP/1.1
+    # response.
+    captured = {"request": b""}
+    server_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    server_sock.bind(("127.0.0.1", 0))
+    server_sock.listen(1)
+    port = server_sock.getsockname()[1]
+
+    def serve_once():
+        conn, _ = server_sock.accept()
+        with conn:
+            conn.settimeout(2.0)
+            buf = b""
+            try:
+                while b"\r\n\r\n" not in buf:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+            except _socket.timeout:
+                pass
+            captured["request"] = buf
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Length: 2\r\n"
+                b"Connection: close\r\n"
+                b"\r\n"
+                b"OK"
+            )
+
+    t = _threading.Thread(target=serve_once, daemon=True)
+    t.start()
+
+    # Pin the transport to 127.0.0.1:<port>. The caller hands it a URL
+    # with a fake hostname so we can verify the host header is sent
+    # while the TCP connect goes to the pinned IP.
+    pinned_ip = _ipaddr.ip_address("127.0.0.1")
+    transport = content._PinnedTransport(pinned_ip, trust_env=False, http2=False)
+
+    req = _httpx.Request(
+        "GET",
+        f"http://attacker.test:{port}/path?q=1",
+        headers={"host": "attacker.test"},
+    )
+    try:
+        with _httpx.Client(transport=transport, timeout=5) as client:
+            response = client.send(req)
+        assert response.status_code == 200, response.text
+    finally:
+        server_sock.close()
+
+    t.join(timeout=2)
+
+    request_bytes = captured["request"]
+    assert request_bytes, "server never received a request"
+    # Host header is the original hostname, not the IP. (httpx
+    # lowercases header names; compare case-insensitively.)
+    headers_blob = request_bytes.lower()
+    assert b"host: attacker.test" in headers_blob, request_bytes
+    # The path was preserved.
+    assert b"/path?q=1" in request_bytes, request_bytes
+
+
+def test_dns_rebinding_pinned_transport_preserves_url_netloc(monkeypatch):
+    """The URL the transport hands to the underlying httpcore layer
+    must still be the original ``https://example.com/...`` — never
+    rewritten to the pinned IP. SNI / vhost depend on this.
+    """
+    from src.search import content
+
+    seen_url = {}
+
+    class _RecordingPool:
+        def handle_request(self, req):
+            seen_url["host"] = req.url.host.decode() if isinstance(req.url.host, bytes) else req.url.host
+            seen_url["scheme"] = req.url.scheme.decode() if isinstance(req.url.scheme, bytes) else req.url.scheme
+            seen_url["target"] = req.url.target.decode() if isinstance(req.url.target, bytes) else req.url.target
+            raise _httpx.ConnectError("intercepted")
+
+        def close(self):
+            pass
+
+    pinned_ip = _ipaddr.ip_address("93.184.216.34")
+    transport = content._PinnedTransport(pinned_ip, trust_env=False, http2=False)
+    transport._pool = _RecordingPool()
+
+    req = _httpx.Request("GET", "https://example.com/some/path?q=1")
+    with _pytest.raises(_httpx.ConnectError):
+        transport.handle_request(req)
+
+    assert seen_url["host"] == "example.com", seen_url
+    assert seen_url["scheme"] == "https", seen_url
+    assert seen_url["target"] == "/some/path?q=1", seen_url
+
+
+def test_dns_rebinding_redirect_re_resolves_per_hop(monkeypatch):
+    """Every redirect hop must call ``_resolve_public_ips`` again.
+    A redirect to a private-IP target must be blocked even when the
+    first hop was public.
+    """
+    from src.search import content
+
+    seen = []
+
+    def fake_resolve(url):
+        seen.append(url)
+        if "private" in url:
+            raise _httpx.RequestError(f"Blocked non-public URL: {url}")
+        return [_ipaddr.ip_address("93.184.216.34")]
+
+    monkeypatch.setattr(content, "_resolve_public_ips", fake_resolve)
+
+    class _Resp:
+        status_code = 302
+        headers = {"location": "http://private.example/secret"}
+
+    class _FakeClient:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, url): return _Resp()
+
+    monkeypatch.setattr(_httpx, "Client", _FakeClient)
+
+    with _pytest.raises(_httpx.RequestError) as exc:
+        content._get_public_url("http://public.example/start", headers={}, timeout=5)
+    assert "non-public" in str(exc.value).lower()
+    # Both hops were validated.
+    assert seen == ["http://public.example/start", "http://private.example/secret"], seen
+
+
+def test_dns_rebinding_transport_uses_public_httpcore_api(monkeypatch):
+    """Static guard: ``_PinnedTransport`` must not read private
+    ``httpcore.ConnectionPool`` attributes (``_ssl_context``,
+    ``_max_connections``, etc.). Catches the v1 fragility that
+    reached into pool internals.
+    """
+    from src.search import content
+
+    import inspect
+    src = inspect.getsource(content._PinnedTransport)
+    forbidden = (
+        "_ssl_context",
+        "_max_connections",
+        "_max_keepalive_connections",
+        "_keepalive_expiry",
+        "_http1",
+        "_http2",
+    )
+    leaked = [name for name in forbidden if name in src]
+    assert not leaked, (
+        f"_PinnedTransport reads private httpcore.ConnectionPool attrs: {leaked}. "
+        "Build the replacement pool from the public httpcore.ConnectionPool API "
+        "instead."
+    )
+

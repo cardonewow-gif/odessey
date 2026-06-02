@@ -8,10 +8,12 @@ import os
 import re
 import logging
 import socket
+import ssl
 from datetime import datetime, timedelta
 from typing import List
 from urllib.parse import urljoin, urlparse
 
+import httpcore
 import httpx
 from bs4 import BeautifulSoup
 
@@ -65,27 +67,118 @@ def _public_http_url(url: str) -> bool:
         ips = _resolve_hostname_ips(host)
     except OSError:
         return False
-    # Fail closed: a hostname that resolves to nothing is treated as
-    # non-public (an empty all(...) would otherwise return True).
     return bool(ips) and all(not _is_private_address(ip) for ip in ips)
 
 
-def _get_public_url(url: str, *, headers: dict, timeout: int) -> httpx.Response:
-    if not _public_http_url(url):
-        raise httpx.RequestError(f"Blocked non-public URL: {url}")
+def _resolve_public_ips(url: str) -> List[ipaddress._BaseAddress]:
+    """Resolve a URL's hostname to IPs that are all public.
 
+    Rejects literal IPs that are private, names that resolve to private IPs,
+    and hostnames that fail to resolve. This is the gate the actual connection
+    must pass through — call it on every hop, not just the first.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise httpx.RequestError(f"Blocked non-public URL: {url}")
+    host = parsed.hostname.strip().lower()
+    if host in ("localhost", "metadata.google.internal", "metadata"):
+        raise httpx.RequestError(f"Blocked non-public hostname: {host}")
+    try:
+        ip = ipaddress.ip_address(host)
+        if _is_private_address(ip):
+            raise httpx.RequestError(f"Blocked non-public IP literal: {host}")
+        return [ip]
+    except httpx.RequestError:
+        raise
+    except ValueError:
+        pass
+    ips = _resolve_hostname_ips(host)
+    if not ips or any(_is_private_address(ip) for ip in ips):
+        raise httpx.RequestError(f"Blocked non-public URL: {url}")
+    return ips
+
+
+class _PinnedBackend(httpcore.NetworkBackend):
+    """Network backend that connects to a pre-resolved IP.
+
+    httpcore derives the TLS SNI and the ``Host`` header from the URL's
+    origin, not from the host argument passed to ``connect_tcp``. So
+    routing the TCP connect to a resolved IP while leaving the URL
+    untouched keeps SNI / vhost behaviour correct and closes the
+    DNS-rebinding TOCTOU between the SSRF check and the connect.
+    """
+
+    def __init__(self, ip: ipaddress._BaseAddress):
+        self._ip = str(ip)
+        self._real = httpcore.SyncBackend()
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options=None,
+    ):
+        return self._real.connect_tcp(
+            self._ip, port, timeout, local_address, socket_options
+        )
+
+    def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        return self._real.connect_unix_socket(path, timeout, socket_options)
+
+    def sleep(self, seconds: float) -> None:
+        return self._real.sleep(seconds)
+
+
+class _PinnedTransport(httpx.HTTPTransport):
+    """HTTPTransport that pins every TCP connect to a pre-resolved IP.
+
+    Lets the parent build a default pool, then immediately replaces it
+    with one whose ``network_backend`` is a ``_PinnedBackend``. The
+    replacement pool is built from the public ``httpcore.ConnectionPool``
+    API — no reads of private ``ConnectionPool`` attributes, so the
+    shape is stable across httpcore versions.
+    """
+
+    def __init__(self, ip: ipaddress._BaseAddress, **kw):
+        super().__init__(**kw)
+        verify = kw.get("verify", True)
+        if isinstance(verify, ssl.SSLContext):
+            ssl_context = verify
+        else:
+            ssl_context = ssl.create_default_context()
+        limits = kw.get("limits", httpx.Limits())
+        replacement = httpcore.ConnectionPool(
+            ssl_context=ssl_context,
+            max_connections=limits.max_connections,
+            max_keepalive_connections=limits.max_keepalive_connections,
+            keepalive_expiry=limits.keepalive_expiry,
+            http1=kw.get("http1", True),
+            http2=kw.get("http2", False),
+            uds=kw.get("uds"),
+            local_address=kw.get("local_address"),
+            retries=kw.get("retries", 0),
+            socket_options=kw.get("socket_options"),
+            network_backend=_PinnedBackend(ip),
+        )
+        self._pool.close()
+        self._pool = replacement
+
+
+def _get_public_url(url: str, *, headers: dict, timeout: int) -> httpx.Response:
     current = url
-    with httpx.Client(headers=headers, timeout=timeout, follow_redirects=False) as client:
-        for _ in range(8):
-            response = client.get(current)
-            if response.status_code not in (301, 302, 303, 307, 308):
-                return response
-            location = response.headers.get("location")
-            if not location:
-                return response
-            current = urljoin(current, location)
-            if not _public_http_url(current):
-                raise httpx.RequestError(f"Blocked redirect to non-public URL: {current}")
+    for _ in range(8):
+        ips = _resolve_public_ips(current)
+        client = httpx.Client(headers=headers, timeout=timeout, follow_redirects=False, transport=_PinnedTransport(ips[0]))
+        with client as pinned:
+            response = pinned.get(current)
+        if response.status_code not in (301, 302, 303, 307, 308):
+            return response
+        location = response.headers.get("location")
+        if not location:
+            return response
+        current = urljoin(current, location)
     raise httpx.RequestError("Too many redirects")
 
 # PDF extraction (optional dependency)
@@ -130,9 +223,9 @@ def _extract_og_image(soup: BeautifulSoup) -> str:
     tag = soup.find("meta", attrs={"name": "thumbnail"})
     if tag and tag.get("content", "").strip():
         candidates.append(tag["content"].strip())
-    # Return first absolute http(s) URL
+    # Return first absolute https URL
     for url in candidates:
-        if url.startswith(("https://", "http://")) and not url.endswith((".svg", ".ico")):
+        if url.startswith("https://") and not url.endswith((".svg", ".ico")):
             return url
     return ""
 
