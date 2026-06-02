@@ -23,14 +23,14 @@ logger = logging.getLogger(__name__)
 
 class SkillAddRequest(BaseModel):
     # New schema (preferred)
-    name: Optional[str] = Field(None, max_length=80)
-    description: Optional[str] = Field(None, max_length=200)
-    category: str = Field("general", max_length=40)
+    name: Optional[str] = Field(None, max_length=120)
+    description: Optional[str] = Field(None, max_length=2000)
+    category: str = Field("general", max_length=60)
     tags: List[str] = Field(default_factory=list)
     platforms: List[str] = Field(default_factory=list)
     requires_toolsets: List[str] = Field(default_factory=list)
     fallback_for_toolsets: List[str] = Field(default_factory=list)
-    when_to_use: Optional[str] = Field(None, max_length=2000)
+    when_to_use: Optional[str] = Field(None, max_length=10000)
     procedure: List[str] = Field(default_factory=list)
     pitfalls: List[str] = Field(default_factory=list)
     verification: List[str] = Field(default_factory=list)
@@ -45,9 +45,9 @@ class SkillAddRequest(BaseModel):
     session_id: Optional[str] = None
 
     # Old schema (back-compat)
-    title: Optional[str] = Field(None, max_length=200)
-    problem: Optional[str] = Field(None, max_length=2000)
-    solution: Optional[str] = Field(None, max_length=5000)
+    title: Optional[str] = Field(None, max_length=500)
+    problem: Optional[str] = Field(None, max_length=10000)
+    solution: Optional[str] = Field(None, max_length=20000)
     steps: List[str] = Field(default_factory=list)
 
 
@@ -1489,19 +1489,59 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         user = _owner(request)
         skills = skills_manager.load(owner=user)
         match = next((s for s in skills if s.get("name") == skill_id or s.get("id") == skill_id), None)
-        if not match:
-            raise HTTPException(404, "Skill not found")
-        _verify_owner(match, user)
 
-        updates = body.dict(exclude_none=True)
-        if not updates:
+        if match:
+            _verify_owner(match, user)
+            updates = body.dict(exclude_none=True)
+            if not updates:
+                return {"ok": True}
+            ok = skills_manager.update_skill(match.get("name"), updates)
+            if not ok:
+                raise HTTPException(404, "Skill not found")
+            if not match.get("audit_verdict"):
+                _fire_skill_added(user)
             return {"ok": True}
-        ok = skills_manager.update_skill(match.get("name"), updates)
-        if not ok:
-            raise HTTPException(404, "Skill not found")
-        if not match.get("audit_verdict"):
-            _fire_skill_added(user)
-        return {"ok": True}
+
+        # Skill not found — upsert: create it on PUT so publish and other
+        # status-only writes work even when the creation step didn't land
+        # (e.g. due to frontend validation or race conditions). Only upsert
+        # when the body contains at minimum a status or description field,
+        # so stray PUTs to random paths don't silently create junk skills.
+        updates = body.dict(exclude_none=True)
+        if updates.get("status") or updates.get("description"):
+            try:
+                entry = skills_manager.add_skill(
+                    name=skill_id,
+                    description=updates.get("description", "") or "",
+                    category=updates.get("category", "general"),
+                    tags=updates.get("tags") or [],
+                    platforms=updates.get("platforms") or [],
+                    requires_toolsets=updates.get("requires_toolsets") or [],
+                    fallback_for_toolsets=updates.get("fallback_for_toolsets") or [],
+                    when_to_use=updates.get("when_to_use", ""),
+                    procedure=updates.get("procedure") or [],
+                    pitfalls=updates.get("pitfalls") or [],
+                    verification=updates.get("verification") or [],
+                    status=updates.get("status", "draft"),
+                    version=updates.get("version", "1.0.0"),
+                    confidence=updates.get("confidence", 0.8),
+                    source="user",
+                    owner=user,
+                    title=updates.get("title", ""),
+                    problem=updates.get("problem", ""),
+                    solution=updates.get("solution", ""),
+                    steps=updates.get("steps") or [],
+                )
+                if not entry.get("_deduped"):
+                    _fire_skill_added(user)
+                return {"ok": True, "upserted": True, "name": entry.get("name")}
+            except Exception as e:
+                logger.warning(f"Skill upsert failed for {skill_id}: {e}")
+                raise HTTPException(500, f"Failed to create skill: {e}")
+
+        # No meaningful update data — treat as not found (preserve original
+        # 404 behaviour for accidental PUTs to nonexistent paths).
+        raise HTTPException(404, "Skill not found")
 
     @router.delete("/{skill_id}")
     async def delete_skill(request: Request, skill_id: str):
