@@ -236,6 +236,22 @@ def _digest_windows(now):
     ]
 
 
+def _digest_window_events(db, model, start, end):
+    """Events with dtstart in [start, end) — upper bound EXCLUSIVE.
+
+    The digest windows are contiguous and share endpoints, so an inclusive
+    upper bound put an event falling exactly on a boundary (e.g. dtstart ==
+    now+2d) into TWO adjacent buckets and the digest listed it twice.
+    """
+    _s = start.replace(tzinfo=None) if start.tzinfo else start
+    _e = end.replace(tzinfo=None) if end.tzinfo else end
+    return db.query(model).filter(
+        model.dtstart >= _s,
+        model.dtstart < _e,
+        model.status != "cancelled",
+    ).order_by(model.dtstart).all()
+
+
 class TaskScheduler:
     def __init__(self, session_manager):
         self._session_manager = session_manager
@@ -1114,14 +1130,7 @@ class TaskScheduler:
             _db = _SL()
             try:
                 for label, start, end in _digest_windows(now):
-                    # Strip timezone for naive DB comparison
-                    _s = start.replace(tzinfo=None) if start.tzinfo else start
-                    _e = end.replace(tzinfo=None) if end.tzinfo else end
-                    evs = _db.query(_CE).filter(
-                        _CE.dtstart >= _s,
-                        _CE.dtstart <= _e,
-                        _CE.status != "cancelled",
-                    ).order_by(_CE.dtstart).all()
+                    evs = _digest_window_events(_db, _CE, start, end)
                     if not evs:
                         continue
                     # Group by importance for richer output
