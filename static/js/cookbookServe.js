@@ -9,6 +9,8 @@ import spinnerModule from './spinner.js';
 import { providerLogo } from './providers.js';
 import { modelColor } from './chatRenderer.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
+import { _hwfitCache } from './cookbook-hwfit.js';
+import { recommendContext, formatContext, CTX_COMMON_SIZES } from './cookbookCtxRecommend.js';
 
 // Shared state/functions injected by init()
 let _envState;
@@ -595,7 +597,43 @@ function _rerenderCachedModels() {
       // Row 2: Core settings
       panelHtml += `<div class="hwfit-serve-row hwfit-backend-vllm hwfit-backend-sglang hwfit-backend-llamacpp">`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('TP','Tensor Parallelism — split model across N GPUs')}<select class="hwfit-sf" data-field="tp">${tpOpts}</select></label>`;
-      panelHtml += `<label>${_l('Context','Max tokens per request. Lower = less VRAM')}<input type="text" class="hwfit-sf" data-field="ctx" value="${esc(sv('ctx', '8192'))}" /></label>`;
+      // Context dropdown: common sizes capped by the model's native window,
+      // with a "recommended" option computed from detected VRAM + model
+      // weights. Math lives in cookbookCtxRecommend.js so it's testable.
+      const _ctxHw = ((_hwfitCache && Array.isArray(_hwfitCache.models)) ? _hwfitCache.models : [])
+        .find(x => (x.name && x.name === repo) || (x.quant_repo && x.quant_repo === repo)) || {};
+      // Native context: prefer the catalog value. When unknown, cap the
+      // dropdown at 256k — high enough for modern long-context models
+      // without showing absurd 1M-token options for tiny base models.
+      const _ctxNative = Number(_ctxHw.context_length || _ctxHw.context || 0)
+        || (Object.keys(_ctxHw).length ? 32768 : 262144);
+      const _ctxModelVramGb = Number(_ctxHw.required_gb || _ctxHw.est_vram_gb || 0) || 0;
+      const _ctxSys = (_hwfitCache && _hwfitCache.system) || {};
+      const _ctxGrp = (Array.isArray(_ctxSys.gpu_groups) ? _ctxSys.gpu_groups : [])[0];
+      const _ctxPoolGb = _ctxGrp
+        ? ((_ctxGrp.use_count || _ctxGrp.count || 1) * (_ctxGrp.vram_each || 0))
+        : (Number(_ctxSys.gpu_vram_gb) || 0);
+      const { recommended: _ctxRecommended } = recommendContext({
+        modelName: repo,
+        weightsGb: _ctxModelVramGb,
+        poolGb: _ctxPoolGb,
+        nativeCtx: _ctxNative,
+      });
+      // Build option list: common sizes ≤ native, plus recommended (in case
+      // it's not a stock value), plus any previously-saved custom value.
+      const _ctxSaved = Number(sv('ctx', '')) || null;
+      const _ctxOptsSet = new Set(CTX_COMMON_SIZES.filter(n => n <= _ctxNative));
+      _ctxOptsSet.add(_ctxRecommended);
+      if (_ctxSaved) _ctxOptsSet.add(_ctxSaved);
+      const _ctxOpts = [..._ctxOptsSet].sort((a, b) => a - b);
+      const _ctxSelected = _ctxSaved || _ctxRecommended;
+      const _ctxOptsHtml = _ctxOpts.map(n => {
+        const tag = (n === _ctxRecommended) ? ' \u2605' : '';
+        const sel = (n === _ctxSelected) ? ' selected' : '';
+        return `<option value="${n}"${sel}>${esc(formatContext(n) + tag)}</option>`;
+      }).join('');
+      const _ctxTitle = `Max tokens per request. Lower = less VRAM. \u2605 = recommended ${formatContext(_ctxRecommended)} based on ${_ctxPoolGb ? Math.round(_ctxPoolGb) + ' GB GPU' : 'model defaults'}${_ctxModelVramGb ? ', ~' + Math.round(_ctxModelVramGb) + ' GB weights' : ''}.`;
+      panelHtml += `<label>${_l('Context', _ctxTitle)}<select class="hwfit-sf" data-field="ctx" style="width:90px;">${_ctxOptsHtml}</select></label>`;
       panelHtml += `<label>${_l('GPU','Which GPU to use. Leave empty for default')}<input type="text" class="hwfit-sf" data-field="gpu_id" value="${esc(sv('gpu_id', ''))}" placeholder="auto" style="width:50px;" /></label>`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('GPU Mem','Fraction of GPU memory (0.0–1.0). Lower if OOM')}<input type="text" class="hwfit-sf" data-field="gpu_mem" value="${esc(sv('gpu_mem', '0.90'))}" /></label>`;
       panelHtml += `<label class="hwfit-backend-vllm">${_l('Swap','CPU swap space in GB. Leave empty to omit (removed in newer vLLM)')}<input type="text" class="hwfit-sf" data-field="swap" value="${esc(sv('swap', ''))}" placeholder="off" /></label>`;
