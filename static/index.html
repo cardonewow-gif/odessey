@@ -1097,6 +1097,19 @@
           </button>
         </div>
         <div class="chat-input-right">
+          <!-- Agent execution mode (approval gating): Auto / Accept Edits / Plan.
+               Only meaningful in Agent mode; hidden while in Chat mode. -->
+          <div class="agentmode-wrap" id="agentmode-wrap">
+            <button type="button" class="agentmode-btn" id="agentmode-btn" title="Agent mode — controls when tools need your approval" aria-haspopup="true" aria-expanded="false">
+              <span class="agentmode-dot" id="agentmode-dot"></span><span id="agentmode-label">Auto</span>
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg>
+            </button>
+            <div class="agentmode-menu hidden" id="agentmode-menu" role="menu">
+              <button type="button" class="agentmode-item" data-agentmode="agent" role="menuitem"><span class="agentmode-dot dot-agent"></span><span class="agentmode-item-text"><strong>Auto</strong><small>Run every tool automatically</small></span></button>
+              <button type="button" class="agentmode-item" data-agentmode="accept_edits" role="menuitem"><span class="agentmode-dot dot-edits"></span><span class="agentmode-item-text"><strong>Accept Edits</strong><small>Auto-run edits; ask before shell / email / destructive</small></span></button>
+              <button type="button" class="agentmode-item" data-agentmode="plan" role="menuitem"><span class="agentmode-dot dot-plan"></span><span class="agentmode-item-text"><strong>Plan</strong><small>Read-only — propose a plan, change nothing</small></span></button>
+            </div>
+          </div>
           <!-- Agent / Chat mode toggle -->
           <div class="mode-toggle">
             <button type="button" class="mode-toggle-btn active" id="mode-agent-btn" aria-pressed="true">Agent</button>
@@ -1377,6 +1390,21 @@
 
         <div data-settings-panel="ai" class="hidden">
           <div class="admin-card">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>Default Agent Mode</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">How autonomously the agent runs tools. The picker next to the message box overrides this per chat. Note: smaller / weaker models may not follow Plan or Accept Edits reliably and can hallucinate tool output (the gate still blocks real execution).</div>
+            <div class="settings-col">
+              <div class="settings-row">
+                <label class="settings-label">Mode</label>
+                <select id="set-defaultAgentMode" class="settings-select">
+                  <option value="agent">Auto — run every tool automatically</option>
+                  <option value="accept_edits">Accept Edits — ask before shell / email / destructive</option>
+                  <option value="plan">Plan — read-only, propose a plan only</option>
+                </select>
+              </div>
+              <div id="set-defaultAgentModeMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+            </div>
+          </div>
+          <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Default Chat Model</h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">The model used when creating a new chat session.</div>
             <div class="settings-col">
@@ -1556,6 +1584,37 @@
               </div>
               <button type="button" id="set-ttsPreviewBtn" class="admin-btn-sm" style="margin-top:4px;padding:5px 16px;font-size:12px;">Preview</button>
               <div id="set-ttsSettingsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+            </div>
+          </div>
+          <!-- Speech to Text (microphone dictation) -->
+          <div class="admin-card">
+            <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>Speech to Text<span style="flex:1"></span><label class="admin-switch"><input type="checkbox" id="set-sttEnabledToggle" checked><span class="admin-slider"></span></label></h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Dictate messages with your microphone. When the message box is empty, the send button becomes a mic. Needs a secure context (localhost or HTTPS).</div>
+            <div id="set-sttConfigWrap" style="display:flex;flex-direction:column;gap:0.5rem;">
+              <div style="display:flex;align-items:center;gap:0.75rem;">
+                <label class="settings-label">Provider</label>
+                <select id="set-sttProviderSelect" class="settings-select">
+                  <option value="disabled">Disabled</option>
+                  <option value="browser">Browser (Web Speech — Chrome/Edge only)</option>
+                  <option value="local">Local Whisper (on-device, private)</option>
+                </select>
+              </div>
+              <div id="set-sttModelRow" style="display:flex;align-items:center;gap:0.75rem;">
+                <label class="settings-label">Model</label>
+                <select id="set-sttModelSelect" class="settings-select">
+                  <option value="tiny">tiny (fastest, ~75 MB)</option>
+                  <option value="base">base (balanced, ~145 MB)</option>
+                  <option value="small">small (better, ~480 MB)</option>
+                  <option value="medium">medium (slow, ~1.5 GB)</option>
+                  <option value="large-v3">large-v3 (best, ~3 GB)</option>
+                </select>
+                <input id="set-sttModelInput" type="text" placeholder="whisper-1" style="flex:1;padding:5px;display:none;">
+              </div>
+              <div id="set-sttLangRow" style="display:flex;align-items:center;gap:0.75rem;">
+                <label class="settings-label">Language</label>
+                <input id="set-sttLangInput" type="text" placeholder="auto (e.g. en, es, fr)" style="flex:1;padding:5px;">
+              </div>
+              <div id="set-sttSettingsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
           </div>
           <div class="admin-card">
