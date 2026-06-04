@@ -8,6 +8,7 @@ import * as spinnerModule from './spinner.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { sortModelIds } from './modelSort.js';
 import { ordinalSuffix } from './util/ordinal.js';
+import { initNotifications, stopNotifications as _wsStop } from './notifications.js';
 
 const API_BASE = window.location.origin;
 let _open = false;
@@ -2642,10 +2643,11 @@ export function closeTasks() {
 
 export function isTasksOpen() { return _open; }
 
-// ---- Task run notifications polling ----
+// ---- Task run notifications — WebSocket push (replaces 30s HTTP polling) ----
 
 let _notifInterval = null;
 
+// Fallback HTTP polling for when WebSocket is unavailable
 async function _pollTaskNotifications() {
   try {
     const res = await fetch(`${API_BASE}/api/tasks/notifications`, { credentials: 'same-origin' });
@@ -2653,35 +2655,37 @@ async function _pollTaskNotifications() {
     const data = await res.json();
     const notes = data.notifications || [];
     for (const n of notes) {
-      const ok = n.status === 'success';
-      // Tasks with output_target='notification' carry the result text in `body`
-      // — show it as a real browser Notification (richer than a toast). Falls
-      // back to a toast when permission is denied or unavailable.
-      if (ok && n.body) {
-        const title = n.task_name || 'Task';
-        let fired = false;
-        try {
-          if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-            new Notification(title, { body: n.body, tag: 'task-' + (n.task_id || title), icon: '/static/favicon.ico' });
-            fired = true;
-          }
-        } catch (_) {}
-        if (!fired && uiModule) uiModule.showToast(title + ': ' + n.body.slice(0, 140), { duration: 7000 });
-        continue;
-      }
-      const msg = `Task ${ok ? 'finished' : 'failed'}: ${n.task_name}`;
-      if (!uiModule) continue;
-      if (ok) uiModule.showToast(msg, { duration: 5000 });
-      else uiModule.showError(msg);
+      _displayNotification(n);
     }
-  } catch (e) {
-    // Silently ignore — server may be unreachable
+  } catch (_) {}
+}
+
+function _displayNotification(n) {
+  const ok = n.status === 'success';
+  if (ok && n.body) {
+    const title = n.task_name || 'Task';
+    let fired = false;
+    try {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        new Notification(title, { body: n.body, tag: 'task-' + (n.task_id || title), icon: '/static/favicon.ico' });
+        fired = true;
+      }
+    } catch (_) {}
+    if (!fired && uiModule) uiModule.showToast(title + ': ' + n.body.slice(0, 140), { duration: 7000 });
+    return;
   }
+  const msg = `Task ${ok ? 'finished' : 'failed'}: ${n.task_name}`;
+  if (!uiModule) return;
+  if (ok) uiModule.showToast(msg, { duration: 5000 });
+  else uiModule.showError(msg);
 }
 
 function startNotificationPolling() {
   if (_notifInterval) return;
-  _notifInterval = setInterval(_pollTaskNotifications, 30000);
+  // Start WebSocket push as primary channel
+  try { initNotifications(API_BASE); } catch (_) {}
+  // Keep a longer-interval HTTP poll as fallback (2 min instead of 30s)
+  _notifInterval = setInterval(_pollTaskNotifications, 120000);
 }
 
 function stopNotificationPolling() {
@@ -2689,9 +2693,10 @@ function stopNotificationPolling() {
     clearInterval(_notifInterval);
     _notifInterval = null;
   }
+  try { _wsStop(); } catch (_) {}
 }
 
-// Start polling on module load
+// Start notifications on module load
 startNotificationPolling();
 
 const tasksModule = { openTasks, closeTasks, isTasksOpen, startNotificationPolling, stopNotificationPolling };

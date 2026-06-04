@@ -94,7 +94,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "font-src 'self' https://cdn.jsdelivr.net; "
                 "img-src 'self' data: blob:; "
                 "media-src 'self' blob:; "
-                "connect-src 'self'; "
+                "connect-src 'self' ws://*:7000 ws://*:7860; "
                 "frame-src 'self'; "
                 "frame-ancestors 'none'"
             )
