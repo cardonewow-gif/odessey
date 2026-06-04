@@ -6,14 +6,20 @@ export function _detectModelOptimizations(modelName) {
   const n = (modelName || '').toLowerCase();
   const opts = { envVars: [], flags: [], tips: [] };
 
+  // MoE active-parameter suffix, e.g. A3B / A10B / A17B / A22B. A generic
+  // A<number>B token so the catalog's A17B Qwen3.5 MoE rows (Qwen3.5-397B-A17B)
+  // are not missed by a hardcoded suffix list. Dense names (e.g. qwen3.5-32b)
+  // have no a<n>b token and stay out of the MoE path.
+  const moeActive = /\ba\d+b\b/.test(n);
+
   // Qwen3.5 MoE models
-  if ((n.includes('qwen3.5') || n.includes('qwen3-')) && (n.includes('a10b') || n.includes('a22b') || n.includes('a3b'))) {
+  if ((n.includes('qwen3.5') || n.includes('qwen3-')) && moeActive) {
     opts.envVars.push('VLLM_USE_DEEP_GEMM=0', 'VLLM_USE_FLASHINFER_MOE_FP16=1', 'VLLM_USE_FLASHINFER_SAMPLER=0', 'OMP_NUM_THREADS=4');
     opts.flags.push('--enable-expert-parallel', '--reasoning-parser qwen3');
     opts.tips.push('MoE optimizations: expert parallel + flashinfer MoE kernels');
   }
   // Qwen3 MoE (non-3.5)
-  else if (n.includes('qwen3') && (n.includes('a10b') || n.includes('a22b') || n.includes('a3b'))) {
+  else if (n.includes('qwen3') && moeActive) {
     opts.envVars.push('VLLM_USE_DEEP_GEMM=0', 'VLLM_USE_FLASHINFER_MOE_FP16=1');
     opts.flags.push('--enable-expert-parallel', '--reasoning-parser qwen3');
     opts.tips.push('MoE optimizations: expert parallel');
