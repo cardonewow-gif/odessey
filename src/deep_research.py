@@ -604,7 +604,7 @@ class DeepResearcher:
             logger.warning(f"Failed to fetch {url}: {e}")
             return None
 
-        if not page.get("success") or not page.get("content"):
+        if page is None or not page.get("success") or not page.get("content"):
             return None
 
         content = page["content"]

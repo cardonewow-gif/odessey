@@ -287,6 +287,8 @@ class ChatProcessor:
         if not skip_url_fetch:
             for url in non_yt_urls:
                 result = fetch_webpage_content(url)
+                if result is None:
+                    continue
                 if result.get('success'):
                     content = result.get('content', '')[:10000]
                     preface.append(untrusted_context_message(

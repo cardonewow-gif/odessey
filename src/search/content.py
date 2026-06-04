@@ -9,7 +9,7 @@ import re
 import logging
 import socket
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -223,7 +223,7 @@ def _empty_result(url: str, error: str = "") -> dict:
 # ----------------------------------------------------------------------
 # Main content fetcher
 # ----------------------------------------------------------------------
-def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0) -> dict:
+def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0) -> Optional[dict]:
     """Fetch and extract meaningful content from a webpage with caching."""
     cache_key = generate_cache_key(url)
     cache_file = CONTENT_CACHE_DIR / f"{cache_key}.cache"
@@ -261,8 +261,11 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0) ->
 
         response.raise_for_status()
     except httpx.RequestError as e:
-        error_logger.error(f"NetworkError fetching {url} (attempt {retry_attempt}): {e}")
-        return _empty_result(url, f"NetworkError: {e}")
+        logger.warning(f"Failed to fetch {url}: {e}")
+        return None
+    except httpx.HTTPStatusError as e:
+        logger.warning(f"HTTP {e.response.status_code} fetching {url}: {e}")
+        return None
     except RateLimitError as e:
         error_logger.error(str(e))
         return _empty_result(url, str(e))

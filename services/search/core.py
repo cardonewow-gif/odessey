@@ -373,7 +373,7 @@ def comprehensive_web_search(
             url = future_to_url[future]
             try:
                 result = future.result()
-                if result["success"] and result["content"] and len(result["content"]) >= min_content_length:
+                if result is not None and result["success"] and result["content"] and len(result["content"]) >= min_content_length:
                     # Remember which source this fetch belongs to: redirects
                     # can change result["url"] and completion order is
                     # arbitrary, so the block label cannot be recomputed later.

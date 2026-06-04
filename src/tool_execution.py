@@ -649,6 +649,8 @@ async def _direct_fallback(
                 # (e.g. eBay 403). Treat that as a tool failure the model can
                 # reason around, not an uncaught chat-stream 500.
                 return {"error": f"web_fetch: {url}: {e}", "exit_code": 1}
+            if result is None:
+                return {"error": f"web_fetch: {url}: failed to fetch content", "exit_code": 1}
             err = result.get("error")
             text = (result.get("content") or "").strip()
             title = result.get("title") or ""
