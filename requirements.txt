@@ -3,6 +3,12 @@ uvicorn
 python-multipart
 python-dotenv
 httpx
+# httpcore is a transitive dep of httpx, but the DNS-rebinding fix
+# uses its public API directly (httpcore.NetworkBackend,
+# httpcore.ConnectionPool, httpcore exceptions). Pin a tested range
+# so a future httpcore release doesn't break the public-API surface
+# the transport relies on.
+httpcore>=1.0,<2.0
 pydantic>=2.0
 pydantic-settings>=2.0
 SQLAlchemy

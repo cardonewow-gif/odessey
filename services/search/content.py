@@ -8,10 +8,12 @@ import os
 import re
 import logging
 import socket
+import ssl
 from datetime import datetime, timedelta
-from typing import List
+from typing import Iterable, List, cast
 from urllib.parse import urljoin, urlparse
 
+import httpcore
 import httpx
 from bs4 import BeautifulSoup
 
@@ -89,12 +91,156 @@ def _public_http_url(url: str) -> bool:
         return False
 
 
+def _resolve_public_ips(url: str) -> list[ipaddress._BaseAddress]:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise httpx.RequestError(f"Blocked non-public URL: {url}")
+    host = (parsed.hostname or "").strip().lower()
+    if host in ("localhost", "metadata", "metadata.google.internal"):
+        raise httpx.RequestError(f"Blocked non-public hostname: {host}")
+    try:
+        ip = ipaddress.ip_address(host)
+        if _is_private_address(ip):
+            raise httpx.RequestError(f"Blocked non-public IP literal: {host}")
+        return [ip]
+    except httpx.RequestError:
+        raise
+    except ValueError:
+        pass
+    addrs = _resolve_hostname_ips(host)
+    if not addrs or any(_is_private_address(a) for a in addrs):
+        raise httpx.RequestError(f"Blocked non-public URL: {url}")
+    return addrs
+
+
+class _PinnedBackend(httpcore.NetworkBackend):
+    """Network backend that connects to a pre-resolved IP.
+
+    httpcore derives the TLS SNI and the ``Host`` header from the URL's
+    origin, not from the host argument passed to ``connect_tcp``. So
+    routing the TCP connect to a resolved IP while leaving the URL
+    untouched keeps SNI / vhost behaviour correct and closes the
+    DNS-rebinding TOCTOU between the SSRF check and the connect.
+    """
+
+    def __init__(self, ip: ipaddress._BaseAddress):
+        self._ip = str(ip)
+        self._real = httpcore.SyncBackend()
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options=None,
+    ):
+        return self._real.connect_tcp(
+            self._ip, port, timeout, local_address, socket_options
+        )
+
+    def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        return self._real.connect_unix_socket(path, timeout, socket_options)
+
+    def sleep(self, seconds: float) -> None:
+        return self._real.sleep(seconds)
+
+
+# Map httpcore exception classes to their httpx equivalents. Built
+# once at import time from the public exception classes; avoids any
+# import of httpx's private transport machinery. httpcore's
+# ``ConnectionNotAvailable`` is a pool-internal signal (the pool will
+# close and retry on its own) — we never expect to see it surface to
+# a transport caller, so it has no httpx counterpart here.
+_HTTPCORE_TO_HTTPX_EXC = {
+    httpcore.ConnectError: httpx.ConnectError,
+    httpcore.ConnectTimeout: httpx.ConnectTimeout,
+    httpcore.LocalProtocolError: httpx.LocalProtocolError,
+    httpcore.NetworkError: httpx.NetworkError,
+    httpcore.PoolTimeout: httpx.PoolTimeout,
+    httpcore.ProtocolError: httpx.ProtocolError,
+    httpcore.ProxyError: httpx.ProxyError,
+    httpcore.ReadError: httpx.ReadError,
+    httpcore.ReadTimeout: httpx.ReadTimeout,
+    httpcore.RemoteProtocolError: httpx.RemoteProtocolError,
+    httpcore.TimeoutException: httpx.TimeoutException,
+    httpcore.UnsupportedProtocol: httpx.UnsupportedProtocol,
+    httpcore.WriteError: httpx.WriteError,
+    httpcore.WriteTimeout: httpx.WriteTimeout,
+}
+
+
+class _PinnedTransport(httpx.BaseTransport):
+    """Transport that pins every TCP connect to a pre-resolved IP.
+
+    Uses only the public ``httpcore`` and ``httpx`` APIs — no
+    subclassing of ``httpx.HTTPTransport``, no reads of private
+    ``httpcore.ConnectionPool`` attributes, no imports from
+    ``httpx._transports``. The URL is passed through unchanged so SNI
+    / vhost work as if httpx had been given the hostname directly;
+    only the TCP destination is pinned, closing the DNS-rebinding
+    TOCTOU between the SSRF check and the connect.
+    """
+
+    def __init__(self, ip: ipaddress._BaseAddress, *, http2: bool = False):
+        self._pool = httpcore.ConnectionPool(
+            ssl_context=ssl.create_default_context(),
+            http1=True,
+            http2=http2,
+            network_backend=_PinnedBackend(ip),
+        )
+
+    def __enter__(self):
+        self._pool.__enter__()
+        return self
+
+    def __exit__(self, exc_type=None, exc_value=None, traceback=None) -> None:
+        self._pool.__exit__(exc_type, exc_value, traceback)
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        httpcore_req = httpcore.Request(
+            method=request.method,
+            url=httpcore.URL(
+                scheme=request.url.raw_scheme,
+                host=request.url.raw_host,
+                port=request.url.port,
+                target=request.url.raw_path,
+            ),
+            headers=request.headers.raw,
+            content=request.stream,
+            extensions=request.extensions,
+        )
+        try:
+            httpcore_resp = self._pool.handle_request(httpcore_req)
+            # Eager materialisation matches the original
+            # ``response.text`` usage in fetch_webpage_content. The
+            # sync pool's stream is a plain Iterable[bytes] despite
+            # the httpcore type hint unioning the async variant.
+            content = b"".join(cast(Iterable[bytes], httpcore_resp.stream))
+        except Exception as exc:
+            mapped = _HTTPCORE_TO_HTTPX_EXC.get(type(exc))
+            if mapped is not None:
+                raise mapped(str(exc)) from exc
+            raise
+
+        return httpx.Response(
+            status_code=httpcore_resp.status,
+            headers=httpcore_resp.headers,
+            content=content,
+            extensions=httpcore_resp.extensions,
+        )
+
+    def close(self) -> None:
+        self._pool.close()
+
+
 def _get_public_url(url: str, headers: dict, timeout: int, max_redirects: int = 5) -> httpx.Response:
     current = url
     for _ in range(max_redirects + 1):
-        if not _public_http_url(current):
-            raise httpx.RequestError("Blocked private/internal URL", request=httpx.Request("GET", current))
-        response = httpx.get(current, headers=headers, timeout=timeout, follow_redirects=False)
+        ips = _resolve_public_ips(current)
+        client = httpx.Client(headers=headers, timeout=timeout, follow_redirects=False, transport=_PinnedTransport(ips[0]))
+        with client as pinned:
+            response = pinned.get(current)
         if response.status_code not in (301, 302, 303, 307, 308):
             return response
         location = response.headers.get("location")
