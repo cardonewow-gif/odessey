@@ -1158,19 +1158,16 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
                 runner_lines.append('fi')
 
-            if not handled_ollama_serve:
-                _append_serve_preflight_exit_lines(
-                    runner_lines,
-                    keep_shell_open=not local_windows,
-                )
-                runner_lines.append(req.cmd)
-                if local_windows:
-                    # Detached background process — no interactive shell to keep open.
-                    # Print the exit marker the status poller looks for, then stop.
-                    _append_serve_exit_code_lines(runner_lines, keep_shell_open=False)
-                else:
-                    # Keep shell open after exit so user can see errors
-                    _append_serve_exit_code_lines(runner_lines, keep_shell_open=True)
+            _append_serve_preflight_exit_lines(
+                runner_lines,
+                keep_shell_open=not local_windows,
+            )
+            _log_path = str(TMUX_LOG_DIR / f"{session_id}.log")
+            runner_lines.append(f'( {req.cmd}; echo "=== Process exited with code $? ===" ) 2>&1 | tee "{_log_path}"')
+            if local_windows:
+                runner_lines.append('exit')
+            else:
+                runner_lines.append('exec "${SHELL:-/bin/bash}"')
 
             runner_path = TMUX_LOG_DIR / f"{session_id}_run.sh"
             runner_path.write_text("\n".join(runner_lines) + "\n", encoding="utf-8")
@@ -1436,6 +1433,62 @@ def setup_cookbook_routes() -> APIRouter:
             processes.append({"pid": pid, "name": name[:80], "used_mb": 0})
         return processes
 
+    async def _probe_nvidia_sysfs(host: str | None, ssh_port: str | None) -> list[dict]:
+        """Detect NVIDIA GPUs via /proc/driver/nvidia when nvidia-smi is unavailable."""
+        base = "/proc/driver/nvidia/gpus"
+        out, err = await _run_gpu_shell(
+            f"ls -1 {base} 2>/dev/null | grep '^[0-9]' || true", host, ssh_port, timeout=4
+        )
+        if err is not None or not out:
+            return []
+        gpus = []
+        for idx_str in out.split():
+            try:
+                idx = int(idx_str)
+            except ValueError:
+                continue
+            info_file = f"{base}/{idx}/information"
+            name_raw = await _gpu_read_file(info_file, host, ssh_port)
+            if not name_raw:
+                continue
+            name = ""
+            vram_total = 0
+            vram_used = 0
+            for line in name_raw.splitlines():
+                line = line.strip()
+                if line.startswith("Device Name:"):
+                    name = line.split(":", 1)[1].strip()
+                elif line.startswith("Video Memory:") or line.startswith("GPU Video Memory:"):
+                    val = line.split(":", 1)[1].strip().split()[0]
+                    try:
+                        num = float(val)
+                        if "MB" in line or "GB" not in line:
+                            vram_total = int(num)
+                        else:
+                            vram_total = int(num * 1024)
+                    except ValueError:
+                        pass
+            mem_file = f"{base}/{idx}/memory/graphics"
+            mem_raw = await _gpu_read_file(mem_file, host, ssh_port)
+            if mem_raw:
+                for line in mem_raw.splitlines():
+                    line = line.strip()
+                    if "Used:" in line:
+                        val = line.split(":", 1)[1].strip().split()[0]
+                        try:
+                            num = float(val)
+                            vram_used = int(num) if "MB" in line else int(num * 1024)
+                        except ValueError:
+                            pass
+            free_mb = max(0, vram_total - vram_used)
+            gpus.append({
+                "index": idx, "name": name or f"NVIDIA GPU {idx}", "uuid": str(idx),
+                "free_mb": free_mb, "total_mb": vram_total, "used_mb": vram_used,
+                "util_pct": 0, "busy": bool(vram_total and (free_mb / vram_total) < 0.85),
+                "processes": [], "backend": "cuda", "source": "nvidia-sysfs",
+            })
+        return gpus
+
     async def _probe_amd_sysfs(host: str | None, ssh_port: str | None) -> list[dict]:
         out, err = await _run_gpu_shell("ls -1 /sys/class/drm 2>/dev/null", host, ssh_port, timeout=4)
         if err is not None or not out:
@@ -1491,6 +1544,62 @@ def setup_cookbook_routes() -> APIRouter:
             if processes:
                 gpus[0]["processes"] = processes
                 gpus[0]["busy"] = True
+        return gpus
+
+    async def _probe_nvidia_sysfs(host: str | None, ssh_port: str | None) -> list[dict]:
+        """Detect NVIDIA GPUs via /proc/driver/nvidia when nvidia-smi is unavailable."""
+        base = "/proc/driver/nvidia/gpus"
+        out, err = await _run_gpu_shell(
+            f"ls -1 {base} 2>/dev/null | grep '^[0-9]' || true", host, ssh_port, timeout=4
+        )
+        if err is not None or not out:
+            return []
+        gpus = []
+        for idx_str in out.split():
+            try:
+                idx = int(idx_str)
+            except ValueError:
+                continue
+            info_file = f"{base}/{idx}/information"
+            name_raw = await _gpu_read_file(info_file, host, ssh_port)
+            if not name_raw:
+                continue
+            name = ""
+            vram_total = 0
+            vram_used = 0
+            for line in name_raw.splitlines():
+                line = line.strip()
+                if line.startswith("Device Name:"):
+                    name = line.split(":", 1)[1].strip()
+                elif line.startswith("Video Memory:") or line.startswith("GPU Video Memory:"):
+                    val = line.split(":", 1)[1].strip().split()[0]
+                    try:
+                        num = float(val)
+                        if "MB" in line or "GB" not in line:
+                            vram_total = int(num)
+                        else:
+                            vram_total = int(num * 1024)
+                    except ValueError:
+                        pass
+            mem_file = f"{base}/{idx}/memory/graphics"
+            mem_raw = await _gpu_read_file(mem_file, host, ssh_port)
+            if mem_raw:
+                for line in mem_raw.splitlines():
+                    line = line.strip()
+                    if "Used:" in line:
+                        val = line.split(":", 1)[1].strip().split()[0]
+                        try:
+                            num = float(val)
+                            vram_used = int(num) if "MB" in line else int(num * 1024)
+                        except ValueError:
+                            pass
+            free_mb = max(0, vram_total - vram_used)
+            gpus.append({
+                "index": idx, "name": name or f"NVIDIA GPU {idx}", "uuid": str(idx),
+                "free_mb": free_mb, "total_mb": vram_total, "used_mb": vram_used,
+                "util_pct": 0, "busy": bool(vram_total and (free_mb / vram_total) < 0.85),
+                "processes": [], "backend": "cuda", "source": "nvidia-sysfs",
+            })
         return gpus
 
     @router.get("/api/cookbook/gpus")
@@ -1630,6 +1739,17 @@ def setup_cookbook_routes() -> APIRouter:
                 "gpus": amd_gpus,
                 "backend": "rocm",
                 "source": "amd-sysfs",
+                "fallback_from": "nvidia-smi",
+                "nvidia_error": nvidia_error,
+            }
+
+        nvidia_sysfs = await _probe_nvidia_sysfs(host, ssh_port)
+        if nvidia_sysfs:
+            return {
+                "ok": True,
+                "gpus": nvidia_sysfs,
+                "backend": "cuda",
+                "source": "nvidia-sysfs",
                 "fallback_from": "nvidia-smi",
                 "nvidia_error": nvidia_error,
             }
@@ -2164,15 +2284,21 @@ def setup_cookbook_routes() -> APIRouter:
                 else:
                     status = "running"
             else:
-                # Session is dead — check if it completed or crashed
-                if task_type == "download" and _download_cache_complete(_payload.get("repo_id") or model, remote, str(_tport or "")):
-                    status = "completed"
-                    if not progress_text:
-                        progress_text = "Download complete"
-                    if not full_snapshot:
-                        full_snapshot = "DOWNLOAD_OK"
-                else:
-                    status = "stopped"
+                # Session is dead — check if it completed successfully by
+                # reading the persistent log file written by tee.
+                status = "stopped"
+                if task_type == "download":
+                    _log_path = str(TMUX_LOG_DIR / f"{session_id}.log")
+                    try:
+                        if Path(_log_path).exists():
+                            with open(_log_path, "r") as lf:
+                                log_text = lf.read().lower()
+                            exit_match = re.search(r'exited with code (\d+)', log_text)
+                            if exit_match:
+                                rc = int(exit_match.group(1))
+                                status = "completed" if rc == 0 else "error"
+                    except Exception:
+                        pass
 
             # Parse structured phase info — single source of truth for the UI
             phase_info = _parse_serve_phase(full_snapshot, task_type) if (task_type == "serve" and status == "running" and full_snapshot) else {}
