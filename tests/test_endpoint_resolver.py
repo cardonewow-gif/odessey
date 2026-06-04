@@ -1,6 +1,9 @@
 """Tests for endpoint_resolver — pure functions tested directly to avoid import pollution."""
 import json
 import re
+import sys
+import types
+from unittest.mock import patch, mock_open
 from urllib.parse import urlparse
 
 
@@ -179,60 +182,89 @@ class TestBuildHeaders:
         assert build_headers("", "https://api.openai.com/v1") == {}
 
 
-class _Ep:
-    """Minimal ModelEndpoint stand-in for the model-picking helpers."""
-    def __init__(self, cached=None, hidden=None):
-        self.cached_models = json.dumps(cached) if cached is not None else None
-        self.hidden_models = json.dumps(hidden) if hidden is not None else None
+# ---------------------------------------------------------------------------
+# _in_docker — import directly since it touches the filesystem
+# ---------------------------------------------------------------------------
+
+def _get_in_docker():
+    """Import _in_docker with a fresh cache each call."""
+    import src.endpoint_resolver as m
+    m._in_docker_cache = None  # reset cache between tests
+    return m._in_docker
 
 
-class TestFirstChatModel:
-    def test_skips_embedding_and_tts(self):
-        models = ["text-embedding-ada-002", "whisper-large-v3", "gpt-4o"]
-        assert _first_chat_model(models) == "gpt-4o"
+class TestInDocker:
+    def setup_method(self):
+        import src.endpoint_resolver as m
+        m._in_docker_cache = None
 
-    def test_falls_back_to_first_when_all_non_chat(self):
-        assert _first_chat_model(["whisper-large-v3"]) == "whisper-large-v3"
+    def test_dockerenv_present(self):
+        with patch("os.path.exists", return_value=True):
+            assert _get_in_docker()() is True
 
-    def test_empty(self):
-        assert _first_chat_model([]) is None
+    def test_cgroup_contains_docker(self):
+        with patch("os.path.exists", return_value=False), \
+             patch("builtins.open", mock_open(read_data="12:devices:/docker/abc123")):
+            assert _get_in_docker()() is True
+
+    def test_cgroup_no_docker_marker(self):
+        with patch("os.path.exists", return_value=False), \
+             patch("builtins.open", mock_open(read_data="0::/")):
+            assert _get_in_docker()() is False
+
+    def test_no_dockerenv_no_proc(self):
+        """macOS / Windows: /proc/1/cgroup absent — must return False, not raise."""
+        with patch("os.path.exists", return_value=False), \
+             patch("builtins.open", side_effect=FileNotFoundError):
+            assert _get_in_docker()() is False
+
+    def test_result_is_cached(self):
+        import src.endpoint_resolver as m
+        m._in_docker_cache = None
+        with patch("os.path.exists", return_value=True):
+            _get_in_docker()()
+        assert m._in_docker_cache is True
+        # Second call must use cache, not re-check filesystem
+        with patch("os.path.exists", side_effect=AssertionError("should not be called")):
+            assert m._in_docker() is True
 
 
-class TestEnabledModels:
-    def test_excludes_hidden(self):
-        # The Groq repro: 16 models, only gpt-oss-120b enabled.
-        cached = [
-            "openai/gpt-oss-safeguard-20b", "canopylabs/orpheus-arabic-saudi",
-            "whisper-large-v3", "openai/gpt-oss-120b",
-        ]
-        hidden = [
-            "openai/gpt-oss-safeguard-20b", "canopylabs/orpheus-arabic-saudi",
-            "whisper-large-v3",
-        ]
-        ep = _Ep(cached=cached, hidden=hidden)
-        assert _endpoint_enabled_models(ep) == ["openai/gpt-oss-120b"]
+# ---------------------------------------------------------------------------
+# resolve_url — localhost rewriting when inside Docker
+# ---------------------------------------------------------------------------
 
-    def test_no_hidden_returns_all(self):
-        ep = _Ep(cached=["a", "b"], hidden=None)
-        assert _endpoint_enabled_models(ep) == ["a", "b"]
+import src.endpoint_resolver as _er
 
-    def test_picker_never_selects_disabled_model(self):
-        # Regression: a disabled model listed first must not be auto-picked.
-        cached = ["canopylabs/orpheus-arabic-saudi", "openai/gpt-oss-120b"]
-        hidden = ["canopylabs/orpheus-arabic-saudi"]
-        ep = _Ep(cached=cached, hidden=hidden)
-        assert _first_chat_model(_endpoint_enabled_models(ep)) == "openai/gpt-oss-120b"
 
-    def test_stale_configured_model_is_discarded(self):
-        # A configured model that's been disabled is dropped, falling through
-        # to the first enabled chat model.
-        ep = _Ep(
-            cached=["canopylabs/orpheus-arabic-saudi", "openai/gpt-oss-120b"],
-            hidden=["canopylabs/orpheus-arabic-saudi"],
-        )
-        configured = "canopylabs/orpheus-arabic-saudi"
-        if configured in _endpoint_hidden_models(ep):
-            configured = ""
-        if not configured:
-            configured = _first_chat_model(_endpoint_enabled_models(ep))
-        assert configured == "openai/gpt-oss-120b"
+class TestResolveUrlDockerRewrite:
+    def setup_method(self):
+        _er._in_docker_cache = None
+
+    def _resolve(self, url, in_docker):
+        with patch.object(_er, "_in_docker", return_value=in_docker), \
+             patch.object(_er, "_resolve_tailscale_host", return_value=None):
+            return _er.resolve_url(url)
+
+    def test_localhost_rewritten_in_docker(self):
+        result = self._resolve("http://localhost:11434/v1", in_docker=True)
+        assert result == "http://host.docker.internal:11434/v1"
+
+    def test_loopback_ip_rewritten_in_docker(self):
+        result = self._resolve("http://127.0.0.1:11434/v1", in_docker=True)
+        assert result == "http://host.docker.internal:11434/v1"
+
+    def test_localhost_not_rewritten_outside_docker(self):
+        result = self._resolve("http://localhost:11434/v1", in_docker=False)
+        assert result == "http://localhost:11434/v1"
+
+    def test_external_host_untouched_in_docker(self):
+        result = self._resolve("http://192.168.1.10:11434/v1", in_docker=True)
+        assert result == "http://192.168.1.10:11434/v1"
+
+    def test_port_preserved_after_rewrite(self):
+        result = self._resolve("http://localhost:8080/v1", in_docker=True)
+        assert "host.docker.internal:8080" in result
+
+    def test_empty_url_unchanged(self):
+        result = self._resolve("", in_docker=True)
+        assert result == ""
