@@ -1176,6 +1176,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = str(queries)
         else:
             content = args.get("query", "")
+    elif tool_type == "web_fetch":
+        content = args.get("url", "")
     elif tool_type == "read_file":
         # Plain path (back-compat) unless a line range is requested → JSON.
         if args.get("offset") or args.get("limit"):
