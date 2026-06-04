@@ -2417,7 +2417,7 @@ function initializeEventListeners() {
   };
 
   // Keys hidden by default on first run (no localStorage yet)
-  const UI_VIS_DEFAULT_OFF = new Set(['models-section', 'rag-toggle-btn']);
+  const UI_VIS_DEFAULT_OFF = new Set(['models-section', 'rag-toggle-btn', 'prominent-tps', 'wide-chat', 'developer-mode']);
 
   // Keys that need admin to toggle off (reserved for future use)
   const UI_VIS_ADMIN_ONLY = new Set([]);
@@ -2452,6 +2452,16 @@ function initializeEventListeners() {
     applyTextEmojis(state['text-emojis'] !== false);
     // Hide thinking sections toggle (show-thinking: checked=show, unchecked=hide)
     document.body.classList.toggle('hide-thinking', state['show-thinking'] === false);
+    // Always-prominent tokens/sec: makes the per-message t/s metric bright and
+    // a touch larger instead of the dim muted footer text that's easy to miss.
+    document.body.classList.toggle('tps-prominent', state['prominent-tps'] === true);
+    // Wide chat: let the message column use the full window width (like
+    // ChatGPT/Claude's wide mode) instead of the default reading-width cap.
+    document.body.classList.toggle('chat-wide', state['wide-chat'] === true);
+    // Developer mode: off by default. When on, reveals the Developer Mode
+    // settings page (gated via this body class in CSS) that holds advanced
+    // power-user toggles, keeping them out of the way for everyone else.
+    document.body.classList.toggle('dev-mode', state['developer-mode'] === true);
   }
 
   // Rearrange toggles in session/model sort dropdowns
