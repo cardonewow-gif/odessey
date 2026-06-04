@@ -1552,16 +1552,136 @@ async function initResearchSearchSettings() {
 }
 
 /* ── Agent Settings (AI tab) ── */
+var globalAgentStyle = 'opencode';
+
+function initAgentPickerUI() {
+  var agentPickerBtn = el('agent-picker-btn');
+  var agentPickerMenu = el('agent-picker-menu');
+  var agentPickerLabel = el('agent-picker-label');
+
+  let _closeTimeout = null;
+  let _closeAnimListener = null;
+
+  function _closeAgentMenu() {
+    if (!agentPickerMenu) return;
+    if (agentPickerMenu.classList.contains('hidden')) return;
+    agentPickerMenu.classList.add('closing');
+    if (_closeAnimListener) {
+      agentPickerMenu.removeEventListener('animationend', _closeAnimListener);
+    }
+    _closeAnimListener = function _onDone() {
+      agentPickerMenu.removeEventListener('animationend', _closeAnimListener);
+      _closeAnimListener = null;
+      agentPickerMenu.classList.remove('closing');
+      agentPickerMenu.classList.add('hidden');
+    };
+    agentPickerMenu.addEventListener('animationend', _closeAnimListener, { once: true });
+    
+    if (_closeTimeout) clearTimeout(_closeTimeout);
+    _closeTimeout = setTimeout(() => {
+      _closeTimeout = null;
+      if (!agentPickerMenu.classList.contains('hidden')) {
+        agentPickerMenu.classList.remove('closing');
+        agentPickerMenu.classList.add('hidden');
+      }
+    }, 200);
+  }
+
+  var items = agentPickerMenu ? agentPickerMenu.querySelectorAll('.model-switch-item') : [];
+  
+  function updateActiveItem(val) {
+    items.forEach(function(i) {
+      if (i.getAttribute('data-value') === val) {
+        i.classList.add('active');
+      } else {
+        i.classList.remove('active');
+      }
+    });
+  }
+
+  if (agentPickerBtn && agentPickerMenu) {
+    agentPickerBtn.addEventListener('click', function(e) {
+      if (agentPickerMenu.classList.contains('hidden') || agentPickerMenu.classList.contains('closing')) {
+        if (_closeTimeout) { clearTimeout(_closeTimeout); _closeTimeout = null; }
+        if (_closeAnimListener) { agentPickerMenu.removeEventListener('animationend', _closeAnimListener); _closeAnimListener = null; }
+        agentPickerMenu.classList.remove('closing', 'hidden');
+      } else {
+        _closeAgentMenu();
+      }
+    });
+    
+    document.addEventListener('click', function(e) {
+      if (!agentPickerMenu.classList.contains('hidden') && !agentPickerMenu.contains(e.target) && !agentPickerBtn.contains(e.target)) {
+        _closeAgentMenu();
+      }
+    });
+
+    items.forEach(function(item) {
+      item.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var previousVal = globalAgentStyle;
+        var previousText = agentPickerLabel ? agentPickerLabel.textContent : '';
+        
+        var val = this.getAttribute('data-value');
+        var text = this.textContent;
+        if (agentPickerLabel) agentPickerLabel.textContent = text;
+        globalAgentStyle = val;
+        updateActiveItem(val);
+        _closeAgentMenu();
+        
+        // Save using fetch
+        fetch('/api/auth/settings', { 
+          method: 'POST', 
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent_prompt_style: globalAgentStyle })
+        }).then(function(r) {
+          if (!r.ok) throw new Error('Save failed');
+        }).catch(function(err) {
+          console.error('Failed to save agent style:', err);
+          globalAgentStyle = previousVal;
+          if (agentPickerLabel) agentPickerLabel.textContent = previousText;
+          updateActiveItem(previousVal);
+        });
+      });
+    });
+  }
+
+  // Fetch initial setting
+  fetch('/api/auth/settings', { credentials: 'same-origin' })
+    .then(res => res.json())
+    .then(settings => {
+      if (settings.agent_prompt_style) {
+        globalAgentStyle = settings.agent_prompt_style;
+        if (agentPickerLabel) {
+          agentPickerLabel.textContent = globalAgentStyle === 'hermes' ? 'Hermes Agent' : 'OpenAgent';
+        }
+      }
+      updateActiveItem(globalAgentStyle);
+    }).catch(e => {
+      updateActiveItem(globalAgentStyle);
+    });
+}
+
+// Initialize the dropdown immediately
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initAgentPickerUI);
+} else {
+  initAgentPickerUI();
+}
+
 async function initAgentSettings() {
   var toolsInput = el('set-agentMaxTools');
   var msg = el('set-agentMsg');
+
   if (!toolsInput) return;
 
   try {
     var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await res.json();
     if (settings.agent_max_tool_calls) toolsInput.value = settings.agent_max_tool_calls;
-  } catch (e) {}
+  } catch (e) {
+  }
 
   async function save() {
     var val = parseInt(toolsInput.value, 10) || 0;
@@ -1570,14 +1690,23 @@ async function initAgentSettings() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agent_max_tool_calls: val })
       });
-      msg.textContent = val > 0 ? 'Limit: ' + val + ' tool calls per message' : 'Unlimited';
-      msg.style.color = 'var(--fg)';
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+      if (msg) {
+        msg.textContent = val > 0 ? 'Limit: ' + val + ' tool calls per message' : 'Unlimited';
+        msg.style.color = 'var(--fg)';
+      }
+    } catch (e) { 
+      if (msg) {
+        msg.textContent = 'Failed to save'; 
+        msg.style.color = 'var(--red)'; 
+      }
+    }
   }
 
   toolsInput.addEventListener('change', save);
   var cur = parseInt(toolsInput.value, 10) || 0;
-  msg.textContent = cur > 0 ? 'Limit: ' + cur + ' tool calls per message' : 'Unlimited';
+  if (msg) {
+    msg.textContent = cur > 0 ? 'Limit: ' + cur + ' tool calls per message' : 'Unlimited';
+  }
 }
 
 /* ═══════════════════════════════════════════
@@ -4521,27 +4650,64 @@ async function initUnifiedIntegrations() {
       el('uf-mcp-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
       el('uf-mcp-save').addEventListener('click', async () => {
         const transport = el('uf-mcp-transport').value;
-        // routes/mcp_routes.py uses FastAPI Form(...) — send multipart, not JSON.
+        const msgEl = el('uf-mcp-msg');
+        msgEl.style.color = '';
+        msgEl.textContent = 'Saving...';
+        
         const fd = new FormData();
-        fd.append('name', el('uf-mcp-name').value);
+        const nameVal = el('uf-mcp-name').value.trim() || 'MCP Server';
+        fd.append('name', nameVal);
         fd.append('transport', transport);
+        
         if (transport === 'stdio') {
-          fd.append('command', el('uf-mcp-cmd').value);
-          let args = '[]'; try { args = JSON.stringify(JSON.parse(el('uf-mcp-args').value || '[]')); } catch (_) {}
-          let env  = '{}'; try { env  = JSON.stringify(JSON.parse(el('uf-mcp-env').value  || '{}')); } catch (_) {}
+          const cmdVal = el('uf-mcp-cmd').value.trim() || el('uf-mcp-cmd').placeholder;
+          fd.append('command', cmdVal);
+          
+          let rawArgs = el('uf-mcp-args').value.trim();
+          let args = '[]';
+          if (rawArgs) {
+            try {
+              args = JSON.stringify(JSON.parse(rawArgs));
+            } catch (_) {
+              const splitArgs = rawArgs.match(/(?:[^\s"']+|['"][^'"]*["'])+/g) || [];
+              const cleanArgs = splitArgs.map(s => s.replace(/^['"]|['"]$/g, ''));
+              args = JSON.stringify(cleanArgs);
+            }
+          }
           fd.append('args', args);
+          
+          let envStr = el('uf-mcp-env').value.trim();
+          let env = '{}';
+          if (envStr) {
+            try {
+              env = JSON.stringify(JSON.parse(envStr));
+            } catch (_) {
+              msgEl.textContent = 'Env must be valid JSON';
+              msgEl.style.color = 'var(--red)';
+              return;
+            }
+          }
           fd.append('env', env);
         } else {
-          fd.append('url', el('uf-mcp-url').value);
+          fd.append('url', el('uf-mcp-url').value.trim());
         }
+        
         try {
           const r = await fetch('/api/mcp/servers', { method: 'POST', credentials: 'same-origin', body: fd });
           if (r.ok) {
-            el('uf-mcp-msg').textContent = 'Saved'; formEl.style.display = 'none'; await renderList();
+            msgEl.textContent = 'Saved';
+            msgEl.style.color = 'var(--green,#50fa7b)';
+            formEl.style.display = 'none';
+            await renderList();
           } else {
-            el('uf-mcp-msg').textContent = `Failed (${r.status})`;
+            const errBody = await r.text().catch(() => '');
+            msgEl.textContent = `Failed (${r.status}): ${errBody.slice(0, 40)}`;
+            msgEl.style.color = 'var(--red)';
           }
-        } catch (_) { el('uf-mcp-msg').textContent = 'Failed'; }
+        } catch (_) {
+          msgEl.textContent = 'Failed to connect to backend';
+          msgEl.style.color = 'var(--red)';
+        }
       });
     }
   }
