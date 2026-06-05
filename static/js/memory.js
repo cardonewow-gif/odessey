@@ -18,6 +18,35 @@ let selectedIds = new Set();
 
 const MEMORY_CATEGORIES = ['fact', 'identity', 'preference', 'contact', 'project', 'goal', 'task'];
 
+// Human-readable descriptions for each category, keyed to match MEMORY_CATEGORIES.
+// The AI import prompt is built dynamically from these so it stays in sync when
+// categories are added or removed.
+const CATEGORY_DESCRIPTIONS = {
+  identity:   'Name, age, location, education, family, relationships, languages, personal background',
+  preference: 'Opinions, tastes, working-style preferences, things I like or dislike, instructions I\'ve given you',
+  fact:       'General facts about me that don\'t fit other categories',
+  contact:    'Email addresses, phone numbers, websites, social handles',
+  project:    'Projects I\'ve built or committed to — include what it does and its status',
+  goal:       'Things I want to achieve or am working toward',
+  task:       'Reminders, todos, things I need to do',
+};
+
+const AI_IMPORT_PROMPT = [
+  'Export everything you know about me as a JSON array of memory objects. Preserve my words verbatim where possible, especially for instructions and preferences.',
+  '',
+  'Categories:',
+  ...MEMORY_CATEGORIES.map(cat => `- ${cat}: ${CATEGORY_DESCRIPTIONS[cat] ?? cat}`),
+  '',
+  'Format — one object per memory:',
+  '[',
+  '  {"text": "I prefer concise replies", "category": "preference"},',
+  '  {"text": "I am a software engineer", "category": "identity"},',
+  '  {"text": "I am building a personal finance tracker", "category": "project"}',
+  ']',
+  '',
+  'Return ONLY valid JSON, no other text.',
+].join('\n');
+
 let _memoryDragWired = false;
 function _wireMemoryDrag() {
   if (_memoryDragWired) return;
@@ -1150,6 +1179,142 @@ export function exportMemories() {
 
 // ---- Import from file ----
 
+async function handleImportFromAI(onSuccess) {
+  const pasteArea = document.getElementById('ai-import-paste');
+  if (!pasteArea) return;
+  const raw = pasteArea.value.trim();
+  if (!raw) { showError('Paste the AI response first'); return; }
+
+  const submitBtn = document.getElementById('ai-import-submit-btn');
+  const _origHtml = submitBtn ? submitBtn.innerHTML : '';
+  let spin = null;
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '';
+    spin = spinnerModule.createWhirlpool(12);
+    spin.element.style.cssText = 'width:12px;height:12px;margin:0 5px 0 0;display:inline-flex;vertical-align:-2px;transform:translateY(-1px);';
+    submitBtn.appendChild(spin.element);
+    submitBtn.appendChild(document.createTextNode('Importing'));
+  }
+
+  try {
+    const formData = new FormData();
+    formData.append('text', raw);
+    const sessionId = sessionModule?.getCurrentSessionId?.();
+    if (sessionId) formData.append('session', sessionId);
+    const res = await fetch(`${window.location.origin}/api/memory/import-from-ai`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Import failed');
+    }
+    const data = await res.json();
+    const suggestions = data.suggestions || [];
+
+    const modal = document.getElementById('memory-modal');
+    const body = document.getElementById('memory-suggestions-body');
+    if (!body) return;
+
+    body.innerHTML = '';
+    body.classList.remove('hidden');
+    const memList = document.getElementById('memory-list');
+    if (memList) memList.classList.add('hidden');
+
+    if (suggestions.length === 0) {
+      body.innerHTML = '<div class="memory-empty">No memories found in the pasted response.</div>';
+    } else {
+      const reviewItems = suggestions
+        .map(s => ({ text: typeof s === 'string' ? s : s.text, category: (typeof s === 'object' && s.category) || 'fact', active: true }))
+        .filter(s => s.text);
+
+      const header = document.createElement('div');
+      header.className = 'memory-suggestions-header';
+      const headerTitle = document.createElement('span');
+      const updateCount = () => { headerTitle.textContent = `Imported from AI (${reviewItems.filter(i => i.active).length}) — Review`; };
+      updateCount();
+      const headerActions = document.createElement('div');
+      headerActions.className = 'memory-suggestions-actions';
+
+      const saveAllBtn = document.createElement('button');
+      saveAllBtn.className = 'memory-item-btn save';
+      saveAllBtn.textContent = 'save all';
+      saveAllBtn.addEventListener('click', async () => {
+        let saved = 0;
+        for (const s of reviewItems) {
+          if (!s.active || !s.text) continue;
+          try {
+            await fetch(`${window.location.origin}/api/memory/add`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: s.text, category: s.category }) });
+            saved++;
+          } catch (e) { /* skip */ }
+        }
+        body.classList.add('hidden');
+        body.innerHTML = '';
+        if (memList) memList.classList.remove('hidden');
+        await loadMemories();
+        document.querySelector('.memory-tab[data-memory-tab="browse"]')?.click();
+        showToast(`Saved ${saved} memories`);
+      });
+
+      const backBtn = document.createElement('button');
+      backBtn.className = 'memory-item-btn';
+      backBtn.textContent = 'back';
+      backBtn.addEventListener('click', () => { body.classList.add('hidden'); body.innerHTML = ''; if (memList) memList.classList.remove('hidden'); });
+
+      headerActions.appendChild(saveAllBtn);
+      headerActions.appendChild(backBtn);
+      header.appendChild(headerTitle);
+      header.appendChild(headerActions);
+      body.appendChild(header);
+
+      reviewItems.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'memory-suggestion-item';
+        const content = document.createElement('div');
+        content.className = 'memory-item-content';
+        const txt = document.createElement('span');
+        txt.className = 'memory-item-text';
+        txt.textContent = item.text;
+        const catBadge = document.createElement('span');
+        catBadge.className = 'memory-cat-badge memory-cat-' + item.category;
+        catBadge.textContent = item.category;
+        content.appendChild(txt);
+        content.appendChild(catBadge);
+        const actionWrap = document.createElement('div');
+        actionWrap.className = 'memory-suggestion-actions';
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'memory-item-btn save';
+        saveBtn.textContent = 'save';
+        saveBtn.addEventListener('click', async () => {
+          await fetch(`${window.location.origin}/api/memory/add`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: item.text, category: item.category }) });
+          item.active = false; div.remove(); updateCount(); showToast('Saved to memory');
+        });
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'memory-item-btn delete';
+        deleteBtn.textContent = 'delete';
+        deleteBtn.addEventListener('click', () => { item.active = false; div.remove(); updateCount(); });
+        actionWrap.appendChild(saveBtn);
+        actionWrap.appendChild(deleteBtn);
+        div.appendChild(content);
+        div.appendChild(actionWrap);
+        body.appendChild(div);
+      });
+    }
+
+    modal.classList.remove('hidden');
+    document.querySelector('.memory-tab[data-memory-tab="browse"]')?.click();
+    pasteArea.value = '';
+    if (typeof onSuccess === 'function') onSuccess();
+  } catch (error) {
+    console.error('AI import failed:', error);
+    showError('Import failed — ' + error.message);
+  } finally {
+    if (spin) spin.destroy();
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = _origHtml; }
+  }
+}
+
 export async function importMemories() {
   const fileInput = document.getElementById('memory-import-file');
   if (!fileInput) return;
@@ -1393,6 +1558,33 @@ document.addEventListener('DOMContentLoaded', () => {
   const importFile = document.getElementById('memory-import-file');
   if (importFile) importFile.addEventListener('change', (e) => {
     if (e.target.files[0]) handleImportFile(e.target.files[0]);
+  });
+
+  // AI import modal
+  const aiImportModal = document.getElementById('ai-import-modal');
+  const closeAiImportModal = () => { if (aiImportModal) aiImportModal.classList.add('hidden'); };
+  const openAiImportModal = () => {
+    if (!aiImportModal) return;
+    const promptArea = document.getElementById('ai-import-prompt');
+    if (promptArea && !promptArea.value) promptArea.value = AI_IMPORT_PROMPT;
+    aiImportModal.classList.remove('hidden');
+  };
+  document.getElementById('ai-import-open-btn')?.addEventListener('click', openAiImportModal);
+  document.getElementById('close-ai-import-modal')?.addEventListener('click', closeAiImportModal);
+  document.getElementById('ai-import-cancel-btn')?.addEventListener('click', closeAiImportModal);
+  if (aiImportModal) aiImportModal.addEventListener('click', e => { if (e.target === aiImportModal) closeAiImportModal(); });
+  document.getElementById('ai-import-copy-btn')?.addEventListener('click', async () => {
+    const btn = document.getElementById('ai-import-copy-btn');
+    try {
+      await navigator.clipboard.writeText(AI_IMPORT_PROMPT);
+      const orig = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    } catch (e) { showError('Copy failed — try selecting and copying manually'); }
+  });
+  document.getElementById('ai-import-submit-btn')?.addEventListener('click', () => handleImportFromAI(closeAiImportModal));
+  document.getElementById('ai-import-paste')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); handleImportFromAI(closeAiImportModal); }
   });
 
   window.addEventListener('memory-refresh', () => {

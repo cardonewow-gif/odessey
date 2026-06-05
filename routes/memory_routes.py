@@ -21,6 +21,55 @@ def _strip_list_prefix(text: str) -> str:
         return text
     return _LIST_PREFIX_RE.sub("", text, count=1).strip()
 
+
+# Single source of truth for memory categories — mirrors MEMORY_CATEGORIES in memory.js.
+_MEMORY_CATEGORIES = ("identity", "preference", "fact", "contact", "project", "goal", "task")
+_VALID_CATEGORIES = set(_MEMORY_CATEGORIES)
+
+
+def _parse_ai_response(raw: str) -> list:
+    """Parse a pasted AI response into a list of {text, category} dicts.
+
+    Tries JSON first (fast path, no LLM needed). Falls back to
+    line-splitting when the response is not valid JSON.
+    """
+    raw = raw.strip()
+    if not raw:
+        return []
+    stripped = raw
+    if stripped.startswith("```"):
+        stripped = stripped.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    parsed = None
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    if isinstance(parsed, list):
+        suggestions = []
+        for item in parsed:
+            if isinstance(item, dict) and item.get("text"):
+                cat = item.get("category") or "fact"
+                if cat not in _VALID_CATEGORIES:
+                    cat = "fact"
+                suggestions.append({
+                    "text": _strip_list_prefix(str(item["text"])),
+                    "category": cat,
+                })
+            elif isinstance(item, str) and item.strip():
+                suggestions.append({
+                    "text": _strip_list_prefix(item.strip()),
+                    "category": "fact",
+                })
+        return suggestions
+    # Fallback: prose or numbered list
+    suggestions = []
+    for line in raw.splitlines():
+        line = _strip_list_prefix(line.strip())
+        if line and len(line) > 5:
+            suggestions.append({"text": line, "category": "fact"})
+    return suggestions[:50]
+
+
 from services.memory import MemoryManager
 from core.session_manager import SessionManager
 from src.request_models import MemoryAddRequest
@@ -429,7 +478,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             "- Focus on personal, memorable information\n"
             "- If there are no useful facts, return an empty array\n\n"
             "Return a JSON array of objects with 'text' and 'category' fields.\n"
-            "Categories: 'identity', 'preference', 'fact', 'contact', 'project', 'goal'\n\n"
+            f"Categories: {', '.join(repr(c) for c in _MEMORY_CATEGORIES)}\n\n"
             "Return ONLY valid JSON, no markdown fences."
         )
 
@@ -478,6 +527,118 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         except Exception as e:
             logger.error(f"Memory import extraction failed: {e}")
             raise HTTPException(502, f"LLM extraction failed: {str(e)}")
+
+    @router.post("/import-from-ai")
+    async def import_memories_from_ai(
+        request: Request,
+        text: str = Form(...),
+        session: str | None = Form(None),
+    ):
+        """Parse a pasted AI response into memory suggestions.
+
+        Fast path: strips code-block fences and tries direct JSON parse —
+        no LLM call needed when the AI followed the requested format.
+        Fallback: routes through the same LLM extraction pipeline as the
+        txt file import when JSON parsing fails (e.g. plain-text export).
+        Final fallback: line-splitting when no LLM is configured.
+        """
+        from src.auth_helpers import require_privilege
+        require_privilege(request, "can_manage_memory")
+
+        raw = (text or "").strip()
+        if not raw:
+            return {"suggestions": []}
+
+        # Fast path — strip fences and try direct JSON parse
+        stripped = raw
+        if stripped.startswith("```"):
+            stripped = stripped.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list) and parsed:
+                suggestions = []
+                for item in parsed:
+                    if isinstance(item, dict) and item.get("text"):
+                        cat = item.get("category") or "fact"
+                        if cat not in _VALID_CATEGORIES:
+                            cat = "fact"
+                        suggestions.append({
+                            "text": _strip_list_prefix(str(item["text"])),
+                            "category": cat,
+                        })
+                    elif isinstance(item, str) and item.strip():
+                        suggestions.append({
+                            "text": _strip_list_prefix(item.strip()),
+                            "category": "fact",
+                        })
+                if suggestions:
+                    return {"suggestions": suggestions}
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # LLM fallback — same extraction pipeline as the txt file import
+        endpoint_url = model = None
+        headers: dict = {}
+        if session:
+            try:
+                sess = session_manager.get_session(session)
+                endpoint_url = sess.endpoint_url
+                model = sess.model
+                headers = sess.headers
+            except KeyError:
+                pass
+        if not endpoint_url:
+            try:
+                endpoint_url, model, headers = resolve_endpoint("utility", owner=_owner(request))
+            except Exception:
+                pass
+
+        if endpoint_url and model:
+            extraction_prompt = (
+                "You are a memory extraction assistant. The user pasted an AI memory export. "
+                "Read it and extract every personal fact, preference, goal, project, contact, "
+                "or other memorable detail.\n\n"
+                "Return a JSON array of objects with 'text' and 'category' fields.\n"
+                f"Categories: {', '.join(repr(c) for c in _MEMORY_CATEGORIES)}\n\n"
+                "Return ONLY valid JSON, no markdown fences."
+            )
+            try:
+                llm_raw = await llm_call_async(
+                    endpoint_url, model,
+                    [
+                        {"role": "system", "content": extraction_prompt},
+                        {"role": "user", "content": raw},
+                    ],
+                    temperature=0.2, max_tokens=2000, headers=headers,
+                )
+                llm_raw = llm_raw.strip()
+                if llm_raw.startswith("```"):
+                    llm_raw = llm_raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                llm_parsed = json.loads(llm_raw)
+                if isinstance(llm_parsed, list):
+                    normalized = []
+                    for s in llm_parsed:
+                        if not s:
+                            continue
+                        if isinstance(s, dict) and s.get("text"):
+                            cat = s.get("category") or "fact"
+                            if cat not in _VALID_CATEGORIES:
+                                cat = "fact"
+                            normalized.append({
+                                "text": _strip_list_prefix(str(s["text"])),
+                                "category": cat,
+                            })
+                        elif isinstance(s, str) and s.strip():
+                            normalized.append({"text": _strip_list_prefix(str(s)), "category": "fact"})
+                    return {"suggestions": normalized}
+            except json.JSONDecodeError:
+                lines = [_strip_list_prefix(l.strip()) for l in llm_raw.splitlines() if l.strip() and len(l.strip()) > 5]
+                return {"suggestions": [{"text": l, "category": "fact"} for l in lines[:20]]}
+            except Exception as e:
+                logger.error(f"AI import LLM extraction failed: {e}")
+
+        # Final fallback — line splitting when no LLM is available or it failed
+        return {"suggestions": _parse_ai_response(raw)}
 
     @router.post("/{memory_id}/pin")
     def pin_memory(request: Request, memory_id: str, pinned: bool = Form(True)):

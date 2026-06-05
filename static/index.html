@@ -240,6 +240,34 @@
     setTimeout(function(){var l=document.getElementById('app-loader');if(l){l.style.opacity='0';setTimeout(function(){l.remove()},300)}},5000);
   })();
   </script>
+  <!-- Import Memory from AI Modal -->
+  <div id="ai-import-modal" class="modal hidden" style="z-index:10002;">
+    <div class="modal-content" style="max-width:480px;width:90%;background:var(--bg);border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,0.4);">
+      <div class="modal-header" style="display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border,rgba(255,255,255,0.1));">
+        <span style="font-weight:600;font-size:14px;">Import Memory from AI</span>
+        <span style="flex:1"></span>
+        <button class="close-btn" id="close-ai-import-modal" aria-label="Close AI import modal">&#x2716;</button>
+      </div>
+      <div style="padding:16px;">
+        <p class="memory-desc" style="margin:0 0 12px;">Ask any AI (Claude, ChatGPT, etc.) to export your memories, then paste the response below.</p>
+        <div style="margin-bottom:12px;">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+            <span style="font-size:11px;font-weight:600;letter-spacing:0.03em;opacity:0.6;">STEP 1 &mdash; COPY THIS PROMPT</span>
+            <button id="ai-import-copy-btn" class="theme-io-btn" style="height:22px;font-size:11px;margin-left:auto;">Copy</button>
+          </div>
+          <textarea id="ai-import-prompt" class="memory-add-input" readonly rows="6" style="font-size:11px;font-family:monospace;resize:none;width:100%;box-sizing:border-box;opacity:0.8;"></textarea>
+        </div>
+        <div style="margin-bottom:12px;">
+          <div style="font-size:11px;font-weight:600;letter-spacing:0.03em;opacity:0.6;margin-bottom:4px;">STEP 2 &mdash; PASTE THE AI&rsquo;S RESPONSE</div>
+          <textarea id="ai-import-paste" class="memory-add-input" placeholder="Paste here..." rows="5" style="resize:vertical;width:100%;box-sizing:border-box;"></textarea>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;">
+          <button id="ai-import-cancel-btn" class="theme-io-btn" style="height:26px;">Cancel</button>
+          <button id="ai-import-submit-btn" class="memory-toolbar-btn">Import</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <!-- Memory Management Modal -->
   <div id="memory-modal" class="modal hidden">
     <div class="modal-content memory-modal-content" role="dialog" aria-label="Brain" style="background:var(--bg)">
@@ -297,6 +325,7 @@
               <span style="flex:1"></span>
               <button id="memory-import-btn" class="theme-io-btn" title="Import memories from a file" style="height:26px;font-size:12px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Import</button>
               <button id="memory-export-btn" class="theme-io-btn" title="Export all memories as JSON" style="height:26px;font-size:12px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Export</button>
+              <button id="ai-import-open-btn" class="theme-io-btn" title="Import memories from an AI assistant" style="height:26px;font-size:12px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:4px;"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>From AI</button>
               <input type="file" id="memory-import-file" accept=".txt,.md,.pdf,.csv,.log,.json,.py,.js,.html" hidden />
             </div>
             <p class="memory-desc doclib-desc" style="margin:4px 0 6px;">
