@@ -5,6 +5,7 @@ Extracted tool implementation functions (do_* and helpers) from agent_tools.py.
 These handle the actual execution logic for each tool type.
 """
 
+import contextvars
 import json
 import logging
 import os
@@ -68,24 +69,26 @@ def _parse_tool_args(content):
 # Active document state
 # ---------------------------------------------------------------------------
 
-_active_document_id: Optional[str] = None
-_active_model: Optional[str] = None
+_active_document_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "active_document_id", default=None
+)
+_active_model_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "active_model", default=None
+)
 
 
 def set_active_document(doc_id: Optional[str]):
     """Set the active document ID for document tool execution."""
-    global _active_document_id
-    _active_document_id = doc_id
+    _active_document_var.set(doc_id)
 
 
 def set_active_model(model: Optional[str]):
     """Set the current model name for version summaries."""
-    global _active_model
-    _active_model = model
+    _active_model_var.set(model)
 
 
 def get_active_document():
-    return _active_document_id
+    return _active_document_var.get()
 
 
 def clear_active_document(doc_id: Optional[str] = None) -> bool:
@@ -303,7 +306,7 @@ async def do_create_document(content_block: str, session_id: Optional[str] = Non
             document_id=doc_id,
             version_number=1,
             content=content,
-            summary=f"Created by {_active_model or 'AI'}",
+            summary=f"Created by {_active_model_var.get() or 'AI'}",
             source="ai",
         )
         db.add(doc)
@@ -337,7 +340,7 @@ async def do_update_document(content: str, doc_id: Optional[str] = None, owner: 
     import uuid
     from src.database import SessionLocal, Document, DocumentVersion
 
-    target_id = doc_id or _active_document_id
+    target_id = doc_id or _active_document_var.get()
 
     db = SessionLocal()
     try:
@@ -364,7 +367,7 @@ async def do_update_document(content: str, doc_id: Optional[str] = None, owner: 
             document_id=target_id,
             version_number=new_ver,
             content=new_content,
-            summary=f"Updated by {_active_model or 'AI'}",
+            summary=f"Updated by {_active_model_var.get() or 'AI'}",
             source="ai",
         )
         doc.current_content = new_content
@@ -401,7 +404,7 @@ async def do_edit_document(content: str, doc_id: Optional[str] = None, owner: Op
     import uuid
     from src.database import SessionLocal, Document, DocumentVersion
 
-    target_id = doc_id or _active_document_id
+    target_id = doc_id or _active_document_var.get()
 
     edits = parse_edit_blocks(content)
     if not edits:
@@ -456,7 +459,7 @@ async def do_edit_document(content: str, doc_id: Optional[str] = None, owner: Op
             document_id=target_id,
             version_number=new_ver,
             content=updated_content,
-            summary=f"Edited by {_active_model or 'AI'} ({applied} edit(s))",
+            summary=f"Edited by {_active_model_var.get() or 'AI'} ({applied} edit(s))",
             source="ai",
         )
         doc.current_content = updated_content
@@ -508,7 +511,7 @@ async def do_suggest_document(content: str, doc_id: str = None, owner: Optional[
     """Create inline suggestions for the active document WITHOUT modifying it."""
     from src.database import SessionLocal, Document
 
-    target_id = doc_id or _active_document_id
+    target_id = doc_id or _active_document_var.get()
     if not target_id:
         return {"error": "No active document to suggest on"}
 
@@ -1479,7 +1482,7 @@ async def do_manage_documents(content: str, owner: Optional[str] = None) -> Dict
             }
 
         elif action == "delete":
-            doc_id = args.get("document_id") or args.get("id") or args.get("uid") or _active_document_id
+            doc_id = args.get("document_id") or args.get("id") or args.get("uid") or _active_document_var.get()
             doc = None
             if doc_id:
                 doc = _get_owned_document(db, Document, doc_id, owner)
@@ -1491,7 +1494,7 @@ async def do_manage_documents(content: str, owner: Optional[str] = None) -> Dict
             title = doc.title
             doc.is_active = False
             db.commit()
-            if _active_document_id == doc.id:
+            if _active_document_var.get() == doc.id:
                 set_active_document(None)
             return {"response": f"Deleted document '{title}'", "exit_code": 0}
 
