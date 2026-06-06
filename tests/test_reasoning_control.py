@@ -65,7 +65,11 @@ class TestEndpointResolution:
 
     def test_same_base_url_disambiguates_by_model(self):
         import json
-        from core.database import SessionLocal, ModelEndpoint
+        from core.database import SessionLocal, ModelEndpoint, Base, engine
+        # CI runs bare pytest against an in-memory SQLite (see conftest); the
+        # model_endpoints table may not be present on the active connection by the
+        # time this runs, so ensure it exists before seeding (no-op if present).
+        Base.metadata.create_all(bind=engine)
         url = "http://shared-rc-test.invalid:9911/v1"
         ids = ["rc-test-a", "rc-test-b"]
         db = SessionLocal()
