@@ -43,8 +43,11 @@ jobs:
           done
 
   python-tests:
-    name: Python tests (pytest)
-    runs-on: ubuntu-latest
+    name: Python tests (pytest, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     # Informational for now: the suite has known flaky / environment-dependent
     # failures (test isolation + embedding-model assertions). Tracked under the
     # ROADMAP "fresh install smoke tests" item; make this required once green.
@@ -56,5 +59,8 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: mkdir -p data  # sqlite DB lives at ./data/app.db
+      # Cross-platform data dir setup (works on Linux and Windows runners).
+      - run: python -c "import os; os.makedirs('data', exist_ok=True)"  # sqlite DB lives at ./data/app.db
       - run: python -m pytest -q
+        env:
+          PYTHONUTF8: "1"
