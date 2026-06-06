@@ -30,6 +30,23 @@ without reshaping. (Full map + sources: docs / reasoning-toggle taxonomy.)
 To add a category later: extend the family detection below for prompt-injection
 styles (#2), or have the resolver also return a request-body fragment for the
 body-field styles (#3–#5), merged into the payload in llm_core.stream_llm.
+
+── Scope of this slice ──
+This is *default-off ``/think`` enablement*: the targeted family (Nemotron-VL)
+reasons only when ``/think`` is present, so ``on`` injects it and ``off``/``auto``
+inject nothing. The ``/no_think`` direction (turning reasoning OFF on default-ON
+``/think`` models such as Qwen3) is the natural next increment and is
+intentionally not included here.
+
+── Alignment with the #2739 capability schema ──
+Two follow-ups land once #2739's control evidence is wired (and persisted) at
+runtime; both swap points are isolated to a single function each:
+  • dispatch off control evidence rather than the model-name heuristic — key on
+    #2739's ``REASONING_CONTROL_reasoning_message_directive`` instead of
+    ``_is_think_directive_model`` (see TODO there);
+  • resolve the preference by stable endpoint/model identity rather than the
+    URL-based lookup (see ``_endpoint_for``).
+Until then this stays standalone: name heuristic + model-aware URL lookup.
 """
 from __future__ import annotations
 
@@ -46,6 +63,9 @@ AUTO, ON, OFF = "auto", "on", "off"
 # enable_thinking kwarg), so for this family `on` -> "/think" and `off`/`auto`
 # inject nothing. Substring match; extend this set (and add /no_think handling
 # for default-ON families like Qwen3) to cover more #1 models.
+# TODO(#2739): replace this name-substring dispatch with #2739 control evidence
+# (REASONING_CONTROL_reasoning_message_directive) once that evidence is wired at
+# runtime — see "Alignment with the #2739 capability schema" above.
 _THINK_DIRECTIVE_MODELS = ("nemotron-nano-12b-vl", "nemotron-nano-vl")
 
 
@@ -59,8 +79,10 @@ def _is_think_directive_model(model: str) -> bool:
 def reasoning_directive(model: str, mode: str) -> Optional[str]:
     """The Category-#1 message directive to inject for this model + preference, or None.
 
-    Only the "/think" soft-switch is implemented. For the Nemotron-VL family
-    (default OFF): `on` -> "/think"; `off`/`auto` -> None. Models that use a
+    Only the "/think" soft-switch is implemented (default-off enablement). For
+    the Nemotron-VL family (default OFF): `on` -> "/think"; `off`/`auto` -> None.
+    The `/no_think` off-direction for default-ON models is not handled yet.
+    Models that use a
     different mechanism (#2–#5) or have no per-request toggle return None, so the
     request is left unchanged — nothing is ever sent to a model that wouldn't
     understand it.
@@ -87,10 +109,16 @@ def inject_directive(messages: List[dict], directive: str) -> None:
 
 
 def reasoning_mode_for(model: str, endpoint_url: str) -> str:
-    """Stored per-model preference (`on`/`off`) for the endpoint serving this URL,
-    else `auto`. Never raises."""
+    """The stored *user preference* (`on`/`off`) for this model on the endpoint
+    serving `endpoint_url`, else `auto`. Never raises.
+
+    `auto`/`on`/`off` here is intent (what the user wants), kept distinct from
+    capability metadata (what the model/provider supports). `auto` means "no
+    explicit choice — leave the model's default", NOT "the provider advertises an
+    adaptive mode" (that is a #2739 capability concept, resolved separately).
+    """
     try:
-        ep = _endpoint_for_url(endpoint_url)
+        ep = _endpoint_for(model, endpoint_url)
         raw = getattr(ep, "reasoning_modes", None) if ep is not None else None
         if not raw:
             return AUTO
@@ -102,9 +130,43 @@ def reasoning_mode_for(model: str, endpoint_url: str) -> str:
         return AUTO
 
 
-def _endpoint_for_url(endpoint_url: str):
-    """Resolve the ModelEndpoint for a runtime chat URL, reusing agent_loop's
-    candidate-key logic (lazy import to avoid an import cycle)."""
+def _endpoint_serves(ep, model: str) -> bool:
+    """Whether `model` is among an endpoint's visible model ids — cached or
+    pinned, minus any that failed probing (`hidden_models`)."""
+    if not model:
+        return False
+    visible, hidden = set(), set()
+    for attr, sink in (("cached_models", visible),
+                       ("pinned_models", visible),
+                       ("hidden_models", hidden)):
+        raw = getattr(ep, attr, None)
+        if not raw:
+            continue
+        try:
+            ids = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            continue
+        if isinstance(ids, list):
+            sink.update(ids)
+    return model in (visible - hidden)
+
+
+def _endpoint_for(model: str, endpoint_url: str):
+    """Resolve the ModelEndpoint whose preference applies to (model, url).
+
+    One base URL can be shared by several endpoint rows (different api keys /
+    owners / model sets), so a URL-only "first match" can read the wrong row.
+    Among the URL matches we therefore prefer the row that actually serves
+    `model`, falling back to the first (preserving the old behaviour when only
+    one matches or none lists the model).
+
+    This is the best identity signal available at the stream layer today, which
+    sees url + model but not the endpoint id. The fuller fix — resolving by stable
+    endpoint/model identity — is the #2739-aligned step once that evidence is
+    threaded through (see the dispatch TODO above).
+
+    Reuses agent_loop's candidate-key logic (lazy import to avoid an import cycle).
+    """
     from core.database import SessionLocal, ModelEndpoint
     try:
         from src.agent_loop import _endpoint_lookup_keys
@@ -114,10 +176,19 @@ def _endpoint_for_url(endpoint_url: str):
         keys = [raw, raw.rstrip("/")]
     db = SessionLocal()
     try:
+        matches, seen = [], set()
         for key in keys:
-            ep = db.query(ModelEndpoint).filter(ModelEndpoint.base_url == key).first()
-            if ep is not None:
+            for ep in db.query(ModelEndpoint).filter(ModelEndpoint.base_url == key).all():
+                if ep.id not in seen:
+                    seen.add(ep.id)
+                    matches.append(ep)
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return matches[0]
+        for ep in matches:  # disambiguate same-base-url rows by model membership
+            if _endpoint_serves(ep, model):
                 return ep
-        return None
+        return matches[0]
     finally:
         db.close()

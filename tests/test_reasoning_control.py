@@ -56,3 +56,42 @@ class TestInjectDirective:
 class TestReasoningModeFor:
     def test_unknown_url_degrades_to_auto(self):
         assert reasoning_mode_for("some-model", "http://nonexistent.invalid:9/v1") == AUTO
+
+
+class TestEndpointResolution:
+    """#6 — when several endpoint rows share a base URL, the preference must be
+    read from the row that actually serves the model; and a model no row serves
+    must not pick up a stray preference (no-leak)."""
+
+    def test_same_base_url_disambiguates_by_model(self):
+        import json
+        from core.database import SessionLocal, ModelEndpoint
+        url = "http://shared-rc-test.invalid:9911/v1"
+        ids = ["rc-test-a", "rc-test-b"]
+        db = SessionLocal()
+        try:
+            db.query(ModelEndpoint).filter(ModelEndpoint.id.in_(ids)).delete(synchronize_session=False)
+            db.add_all([
+                ModelEndpoint(id="rc-test-a", name="A", base_url=url, is_enabled=True,
+                              cached_models=json.dumps(["model-a"]),
+                              reasoning_modes=json.dumps({"model-a": "on"})),
+                ModelEndpoint(id="rc-test-b", name="B", base_url=url, is_enabled=True,
+                              cached_models=json.dumps(["model-b"]),
+                              reasoning_modes=json.dumps({"model-b": "off"})),
+            ])
+            db.commit()
+        finally:
+            db.close()
+        try:
+            # each model resolves via the row that actually serves it...
+            assert reasoning_mode_for("model-a", url) == ON
+            assert reasoning_mode_for("model-b", url) == OFF
+            # ...and a model neither row serves gets no stray preference.
+            assert reasoning_mode_for("model-c", url) == AUTO
+        finally:
+            db = SessionLocal()
+            try:
+                db.query(ModelEndpoint).filter(ModelEndpoint.id.in_(ids)).delete(synchronize_session=False)
+                db.commit()
+            finally:
+                db.close()
