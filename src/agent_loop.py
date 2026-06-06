@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 from src.llm_core import stream_llm, stream_llm_with_fallback, _is_ollama_native_url
 from src.model_context import estimate_tokens
+from src.prompt_budget import PromptBudgetSection, build_prompt_budget_report
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
@@ -404,44 +405,79 @@ def _section_text(name: str, default: str) -> str:
     return val if isinstance(val, str) and val.strip() else default
 
 
-def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool = False) -> str:
-    """Build the system prompt with only the specified tools included."""
+def _tool_section_category(name: str) -> str:
+    if name == "manage_memory":
+        return "memory_tool"
+    return "builtin_tool"
+
+
+def _join_prompt_sections(sections: List[PromptBudgetSection]) -> str:
+    out = ""
+    for section in sections:
+        if not section.text:
+            continue
+        if out:
+            out += section.join_before
+        out += section.text
+    return out
+
+
+def _assemble_prompt_sections(
+    tool_names: set,
+    disabled_tools: set = None,
+    compact: bool = False,
+) -> List[PromptBudgetSection]:
+    """Build prompt sections for the built-in agent prompt."""
     disabled = disabled_tools or set()
     included = tool_names - disabled
 
     if compact:
         tool_list = ", ".join(sorted(included)) if included else "none"
-        parts = [
-            "You are an AI assistant with tool access.",
-            f"Available tools: {tool_list}.",
-            _API_AGENT_RULES,
+        return [
+            PromptBudgetSection("agent_preamble", "base", "You are an AI assistant with tool access."),
+            PromptBudgetSection("available_tool_names", "tool_selection", f"Available tools: {tool_list}.", item_count=len(included)),
+            PromptBudgetSection("api_agent_rules", "base", _API_AGENT_RULES),
         ]
-        return "\n\n".join(parts)
 
-    parts = [_AGENT_PREAMBLE]
-
-    # Collect full-block tool sections (with examples)
-    full_blocks = []
-    # Collect one-liner tool sections
+    sections = [PromptBudgetSection("agent_preamble", "base", _AGENT_PREAMBLE)]
     one_liners = []
 
     for name, _default_section in TOOL_SECTIONS.items():
         if name not in included:
             continue
         section = _section_text(name, _default_section)
-        if section.startswith("```") or section.startswith("-"):
-            if section.startswith("- "):
-                one_liners.append(section)
-            else:
-                full_blocks.append(section)
-
-    if full_blocks:
-        parts.append("\n\n".join(full_blocks))
+        if not (section.startswith("```") or section.startswith("-")):
+            continue
+        if section.startswith("- "):
+            one_liners.append((name, section))
+        else:
+            sections.append(
+                PromptBudgetSection(
+                    f"builtin_tool.{name}",
+                    _tool_section_category(name),
+                    section,
+                )
+            )
 
     if one_liners:
-        parts.append("## Additional tools\n" + "\n".join(one_liners))
+        sections.append(
+            PromptBudgetSection(
+                "builtin_tool.one_liners_header",
+                "builtin_tool_group",
+                "## Additional tools",
+                item_count=len(one_liners),
+            )
+        )
+        for name, section in one_liners:
+            sections.append(
+                PromptBudgetSection(
+                    f"builtin_tool.{name}",
+                    _tool_section_category(name),
+                    section,
+                    join_before="\n",
+                )
+            )
 
-    # Mention tools that exist but weren't included
     all_known = set(TOOL_SECTIONS.keys())
     not_shown = all_known - included - disabled
     if not_shown:
@@ -449,10 +485,22 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
         hint = ", ".join(sample)
         if len(not_shown) > 5:
             hint += f", ... ({len(not_shown) - 5} more)"
-        parts.append(f"(Other tools available when needed: {hint})")
+        sections.append(
+            PromptBudgetSection(
+                "other_tools_available_hint",
+                "tool_selection",
+                f"(Other tools available when needed: {hint})",
+                item_count=len(not_shown),
+            )
+        )
 
-    parts.append(_AGENT_RULES)
-    return "\n\n".join(parts)
+    sections.append(PromptBudgetSection("agent_rules", "base", _AGENT_RULES))
+    return sections
+
+
+def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool = False) -> str:
+    """Build the system prompt with only the specified tools included."""
+    return _join_prompt_sections(_assemble_prompt_sections(tool_names, disabled_tools, compact))
 
 
 # Legacy: full prompt with all tools (fallback when RAG unavailable)
@@ -1004,58 +1052,8 @@ _ADMIN_TOOLS = {
     "send_to_session", "pipeline", "ask_teacher", "list_models",
 }
 
-def _build_base_prompt(
-    disabled_tools,
-    mcp_mgr,
-    needs_admin,
-    relevant_tools=None,
-    mcp_disabled_map=None,
-    compact: bool = False,
-):
-    """Build the agent prompt with only relevant tools included.
 
-    If relevant_tools is provided (from RAG retrieval), only those tools
-    are shown with full descriptions. Otherwise falls back to full prompt.
-    """
-    from src.tool_index import ALWAYS_AVAILABLE
-
-    disabled = set(disabled_tools or [])
-    if not get_setting("image_gen_enabled", True):
-        disabled.add("generate_image")
-
-    if relevant_tools is not None:
-        # RAG mode: include always-available + retrieved + admin (if needed)
-        tool_names = set(ALWAYS_AVAILABLE) | set(relevant_tools)
-        if needs_admin:
-            tool_names |= _ADMIN_TOOLS
-        agent_prompt = _assemble_prompt(tool_names, disabled, compact=compact)
-    else:
-        # Fallback: full prompt (RAG unavailable)
-        agent_prompt = AGENT_SYSTEM_PROMPT
-        if not needs_admin:
-            # At least strip the management section
-            mgmt_tools = set(TOOL_SECTIONS.keys()) - set(ALWAYS_AVAILABLE) - {
-                "generate_image", "suggest_document",
-                "chat_with_model", "ask_teacher", "list_models",
-            }
-            agent_prompt = _assemble_prompt(
-                set(TOOL_SECTIONS.keys()) - mgmt_tools, disabled, compact=compact
-            )
-        elif compact:
-            agent_prompt = _assemble_prompt(set(TOOL_SECTIONS.keys()), disabled, compact=True)
-
-    # Inject the Level-0 skill index — one line per skill so the agent
-    # knows what canonical procedures exist. Includes published skills
-    # plus teacher-escalation drafts (auto-written when the student
-    # fails a task; appear here on the very next turn so the student
-    # can apply them immediately). Full SKILL.md fetched on demand via
-    # `manage_skills view name=...`. Gating mirrors index_for: platform
-    # + requires_toolsets + fallback_for_toolsets.
-    #
-    # SECURITY: skill `name` and `description` are user-editable, so the
-    # index block is returned SEPARATELY (not appended to agent_prompt).
-    # The caller wraps it in untrusted_context_message and ships it as a
-    # user-role message — same treatment as the matched-skills block.
+def _build_skill_index_block(disabled: Set[str]) -> str:
     skill_index_block = ""
     try:
         from services.memory.skills import SkillsManager
@@ -1081,23 +1079,134 @@ def _build_base_prompt(
                     lines.append(f"- `{s['name']}` — {s['description']}{badge}")
             skill_index_block = "\n\n" + "\n".join(lines)
     except Exception as _e:
-        # Skill index is a soft enhancement — never fail prompt assembly on it.
+        # Skill index is a soft enhancement -- never fail prompt assembly on it.
         logger.debug(f"Skill-index injection skipped: {_e}")
+    return skill_index_block
 
-    # Inject integration descriptions
+
+def _build_base_prompt_sections(
+    disabled_tools,
+    mcp_mgr,
+    needs_admin,
+    relevant_tools=None,
+    mcp_disabled_map=None,
+    compact: bool = False,
+):
+    """Build section objects for the base prompt without changing behavior."""
+    from src.tool_index import ALWAYS_AVAILABLE
+
+    disabled = set(disabled_tools or [])
+    if not get_setting("image_gen_enabled", True):
+        disabled.add("generate_image")
+
+    if relevant_tools is not None:
+        tool_names = set(ALWAYS_AVAILABLE) | set(relevant_tools)
+        if needs_admin:
+            tool_names |= _ADMIN_TOOLS
+        sections = _assemble_prompt_sections(tool_names, disabled, compact=compact)
+    else:
+        if not needs_admin:
+            mgmt_tools = set(TOOL_SECTIONS.keys()) - set(ALWAYS_AVAILABLE) - {
+                "generate_image", "suggest_document",
+                "chat_with_model", "ask_teacher", "list_models",
+            }
+            sections = _assemble_prompt_sections(
+                set(TOOL_SECTIONS.keys()) - mgmt_tools,
+                disabled,
+                compact=compact,
+            )
+        elif compact:
+            sections = _assemble_prompt_sections(set(TOOL_SECTIONS.keys()), disabled, compact=True)
+        else:
+            sections = [
+                PromptBudgetSection(
+                    "agent_system_prompt_legacy_full",
+                    "base",
+                    AGENT_SYSTEM_PROMPT,
+                    item_count=len(TOOL_SECTIONS),
+                )
+            ]
+
+    skill_index_block = _build_skill_index_block(disabled)
+
     from src.integrations import get_integrations_prompt
     integ_prompt = get_integrations_prompt()
     if integ_prompt:
-        agent_prompt += "\n\n" + integ_prompt
+        sections.append(PromptBudgetSection("integration_descriptions", "integration", integ_prompt))
 
-    # Inject MCP tool descriptions
     if mcp_mgr:
         mcp_desc = mcp_mgr.get_tool_descriptions_for_prompt(mcp_disabled_map or {})
         if mcp_desc:
-            agent_prompt += mcp_desc
+            sections.append(
+                PromptBudgetSection(
+                    "mcp_tool_descriptions",
+                    "mcp",
+                    mcp_desc,
+                    join_before="",
+                )
+            )
 
-    return agent_prompt, skill_index_block
+    return sections, skill_index_block
 
+
+def _build_base_prompt(
+    disabled_tools,
+    mcp_mgr,
+    needs_admin,
+    relevant_tools=None,
+    mcp_disabled_map=None,
+    compact: bool = False,
+):
+    """Build the agent prompt with only relevant tools included.
+
+    If relevant_tools is provided (from RAG retrieval), only those tools
+    are shown with full descriptions. Otherwise falls back to full prompt.
+    """
+    sections, skill_index_block = _build_base_prompt_sections(
+        disabled_tools,
+        mcp_mgr,
+        needs_admin,
+        relevant_tools=relevant_tools,
+        mcp_disabled_map=mcp_disabled_map,
+        compact=compact,
+    )
+    # Inject the Level-0 skill index — one line per skill so the agent
+    # knows what canonical procedures exist. Includes published skills
+    # plus teacher-escalation drafts (auto-written when the student
+    # fails a task; appear here on the very next turn so the student
+    # can apply them immediately). Full SKILL.md fetched on demand via
+    # `manage_skills view name=...`. Gating mirrors index_for: platform
+    # + requires_toolsets + fallback_for_toolsets.
+    #
+    # SECURITY: skill `name` and `description` are user-editable, so the
+    # index block is returned SEPARATELY (not appended to agent_prompt).
+    # The caller wraps it in untrusted_context_message and ships it as a
+    # user-role message — same treatment as the matched-skills block.
+    return _join_prompt_sections(sections), skill_index_block
+
+
+def build_base_prompt_budget_report(
+    disabled_tools=None,
+    mcp_mgr=None,
+    needs_admin: bool = False,
+    relevant_tools=None,
+    mcp_disabled_map=None,
+    compact: bool = False,
+    *,
+    largest_limit: int = 10,
+):
+    """Return a non-sensitive cost breakdown for the assembled base prompt."""
+    sections, skill_index_block = _build_base_prompt_sections(
+        disabled_tools,
+        mcp_mgr,
+        needs_admin,
+        relevant_tools=relevant_tools,
+        mcp_disabled_map=mcp_disabled_map,
+        compact=compact,
+    )
+    if skill_index_block:
+        sections.append(PromptBudgetSection("skill_index", "skill_context", skill_index_block))
+    return build_prompt_budget_report(sections, largest_limit=largest_limit)
 
 
 def _resolve_tool_blocks(round_response: str, native_tool_calls: list, round_num: int):
