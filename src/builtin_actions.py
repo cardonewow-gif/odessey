@@ -505,7 +505,7 @@ async def action_summarize_emails(owner: str, **kwargs) -> Tuple[str, bool]:
     """Run one pass of email summary background processing."""
     try:
         from routes.email_pollers import _run_auto_summarize_once
-        result = await _run_auto_summarize_once(do_summary=True, do_reply=False)
+        result = await _run_auto_summarize_once(do_summary=True, do_reply=False, owner=owner)
         if not _result_has_work(result):
             raise TaskNoop(f"summarize: {result or 'no new emails'}")
         return result, True
@@ -522,6 +522,7 @@ async def action_draft_email_replies(owner: str, **kwargs) -> Tuple[str, bool]:
             do_summary=False,
             do_reply=True,
             days_back=7,
+            owner=owner,
             progress_cb=kwargs.get("progress_cb"),
         )
         if not _result_has_work(result):
@@ -758,7 +759,7 @@ async def action_extract_email_events(owner: str, **kwargs) -> Tuple[str, bool]:
             # Hard wall-clock budget: 5 min total. Per-LLM call already has its own timeout.
             result = await _aio.wait_for(
                 _run_auto_summarize_once(
-                    do_summary=False, do_reply=False, do_calendar=True, days_back=3,
+                    do_summary=False, do_reply=False, do_calendar=True, days_back=3, owner=owner,
                 ),
                 timeout=300,
             )
@@ -803,7 +804,7 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
         # 1. Pull recent UIDs + From headers cheaply (header-only fetch).
         def _pull_headers():
             results = []
-            conn = _imap_connect(None)
+            conn = _imap_connect(None, owner=owner)
             try:
                 conn.select("INBOX", readonly=True)
                 status, data = conn.search(None, "ALL")
@@ -853,11 +854,13 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
             by_sender.setdefault(addr, []).append(m)
 
         # 3. Eligibility: ≥3 emails AND (no cache OR cache > 30 days old).
+        cache_owner = owner or ""
         try:
             conn = _sql3.connect(SCHEDULED_DB)
             cached = {
                 r[0]: r[1] for r in conn.execute(
-                    "SELECT from_address, last_built_at FROM sender_signatures"
+                    "SELECT from_address, last_built_at FROM sender_signatures WHERE owner=?",
+                    (cache_owner,),
                 ).fetchall()
             }
             conn.close()
@@ -888,7 +891,7 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
 
             def _fetch_bodies(_msgs):
                 bodies = []
-                conn2 = _imap_connect(None)
+                conn2 = _imap_connect(None, owner=owner)
                 try:
                     conn2.select("INBOX", readonly=True)
                     for mm in _msgs:
@@ -967,9 +970,9 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
                 conn = _sql3.connect(SCHEDULED_DB)
                 conn.execute(
                     "INSERT OR REPLACE INTO sender_signatures "
-                    "(from_address, signature_text, sample_count, last_built_at, model_used, source) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (addr, cached_sig, len(bodies), _dt.utcnow().isoformat(), model, "llm"),
+                    "(from_address, owner, signature_text, sample_count, last_built_at, model_used, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (addr, cache_owner, cached_sig, len(bodies), _dt.utcnow().isoformat(), model, "llm"),
                 )
                 conn.commit()
                 conn.close()

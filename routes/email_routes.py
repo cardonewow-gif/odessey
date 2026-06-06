@@ -936,11 +936,12 @@ def setup_email_routes():
                     import sqlite3 as _sql3
                     _c = _sql3.connect(SCHEDULED_DB)
                     placeholders = ",".join("?" * len(ids))
-                    owner_clause, owner_params = _email_cache_owner_clause(owner)
+                    _owner_aliases = _email_tag_owner_aliases(account_id, owner)
+                    _owner_ph = ",".join("?" * len(_owner_aliases))
                     rows = _c.execute(
                         f"SELECT message_id, summary FROM email_summaries "
-                        f"WHERE message_id IN ({placeholders}) AND {owner_clause}",
-                        (*ids, *owner_params),
+                        f"WHERE owner IN ({_owner_ph}) AND message_id IN ({placeholders})",
+                        [*_owner_aliases, *ids],
                     ).fetchall()
                     _c.close()
                     by_id = {r[0]: r[1] for r in rows}
@@ -1223,22 +1224,26 @@ def setup_email_routes():
             try:
                 import sqlite3 as _sql3
                 _c = _sql3.connect(SCHEDULED_DB)
-                owner_clause, owner_params = _email_cache_owner_clause(owner)
+                _owner_aliases = _email_tag_owner_aliases(account_id, owner)
+                _owner_ph = ",".join("?" * len(_owner_aliases))
                 _row = _c.execute(
-                    f"SELECT summary FROM email_summaries WHERE message_id = ? AND {owner_clause}",
-                    (message_id.strip(), *owner_params),
+                    f"SELECT summary FROM email_summaries "
+                    f"WHERE message_id = ? AND owner IN ({_owner_ph})",
+                    (message_id.strip(), *_owner_aliases),
                 ).fetchone()
                 if _row:
                     cached_summary = _row[0]
                 _row2 = _c.execute(
-                    f"SELECT reply FROM email_ai_replies WHERE message_id = ? AND {owner_clause}",
-                    (message_id.strip(), *owner_params),
+                    f"SELECT reply FROM email_ai_replies "
+                    f"WHERE message_id = ? AND owner IN ({_owner_ph})",
+                    (message_id.strip(), *_owner_aliases),
                 ).fetchone()
                 if _row2:
                     cached_ai_reply = _apply_email_style_mechanics(_extract_reply(_row2[0] or ""))
                 _row3 = _c.execute(
-                    "SELECT sig_start, quote_start, turns_json FROM email_boundaries WHERE message_id = ?",
-                    (message_id.strip(),),
+                    f"SELECT sig_start, quote_start, turns_json FROM email_boundaries "
+                    f"WHERE message_id = ? AND owner IN ({_owner_ph})",
+                    (message_id.strip(), *_owner_aliases),
                 ).fetchone()
                 cached_turns = None
                 cached_sender_sig = None
@@ -1248,8 +1253,9 @@ def setup_email_routes():
                 try:
                     if sender_addr:
                         _rs = _c.execute(
-                            "SELECT signature_text FROM sender_signatures WHERE from_address = ?",
-                            (sender_addr.lower().strip(),),
+                            f"SELECT signature_text FROM sender_signatures "
+                            f"WHERE from_address = ? AND owner IN ({_owner_ph})",
+                            (sender_addr.lower().strip(), *_owner_aliases),
                         ).fetchone()
                         if _rs and _rs[0]:
                             cached_sender_sig = _rs[0]
@@ -2557,7 +2563,7 @@ def setup_email_routes():
                         (message_id, owner, uid, folder, subject, sender, summary, model_used, created_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
-                        mid, owner, data.get("uid", ""), data.get("folder", ""),
+                        mid, owner or "", data.get("uid", ""), data.get("folder", ""),
                         subject, sender, content, model, datetime.utcnow().isoformat(),
                     ))
                     _c.commit()
@@ -2591,11 +2597,13 @@ def setup_email_routes():
 
             if message_id:
                 try:
+                    _owner_aliases = _email_tag_owner_aliases(None, owner)
+                    _owner_ph = ",".join("?" * len(_owner_aliases))
                     _c = _sql3.connect(SCHEDULED_DB)
-                    owner_clause, owner_params = _email_cache_owner_clause(owner)
                     _row = _c.execute(
-                        f"SELECT reply, model_used FROM email_ai_replies WHERE message_id = ? AND {owner_clause}",
-                        (message_id, *owner_params),
+                        f"SELECT reply, model_used FROM email_ai_replies "
+                        f"WHERE message_id = ? AND owner IN ({_owner_ph})",
+                        (message_id, *_owner_aliases),
                     ).fetchone()
                     _c.close()
                     if _row and _row[0]:
@@ -2799,7 +2807,7 @@ def setup_email_routes():
                         INSERT OR REPLACE INTO email_ai_replies
                         (message_id, owner, uid, folder, reply, model_used, created_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, (message_id, owner, source_uid, source_folder, reply, model, datetime.utcnow().isoformat()))
+                    """, (message_id, owner or "", source_uid, source_folder, reply, model, datetime.utcnow().isoformat()))
                     _c.commit()
                     _c.close()
                 except Exception as e:

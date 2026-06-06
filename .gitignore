@@ -12,8 +12,9 @@ venv/
 
 # Environment
 .env
-.env.bak.*
+.env.*
 !.env.example
+!.env.online.example
 
 # Data — all user data stays local
 data/

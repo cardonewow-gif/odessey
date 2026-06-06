@@ -2,6 +2,7 @@
 import sys
 import os
 import types
+import importlib
 import importlib.util
 from unittest.mock import MagicMock
 
@@ -48,6 +49,17 @@ for mod_name in [
 ]:
     if mod_name not in sys.modules and not _has_module(mod_name):
         sys.modules[mod_name] = MagicMock()
+
+# Prefer real core modules when the test environment has their dependencies.
+# Several legacy tests install MagicMock stubs only when these modules are absent
+# during collection; eagerly importing the real modules prevents those stubs from
+# leaking into later DB-backed tests in a full-suite run.
+for mod_name in ("core.database", "src.endpoint_resolver"):
+    if mod_name not in sys.modules:
+        try:
+            importlib.import_module(mod_name)
+        except Exception:
+            pass
 
 if "src.database" not in sys.modules:
     _db = types.ModuleType("src.database")

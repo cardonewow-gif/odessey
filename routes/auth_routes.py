@@ -73,6 +73,22 @@ class SetOpenRegistrationRequest(BaseModel):
 SESSION_COOKIE = "odysseus_session"
 
 
+def _env_true(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _request_from_loopback(request: Request) -> bool:
+    client_host = request.client.host if request.client else ""
+    forwarded = (
+        request.headers.get("x-forwarded-for")
+        or request.headers.get("x-real-ip")
+        or ""
+    )
+    if forwarded:
+        client_host = forwarded.split(",", 1)[0].strip()
+    return client_host in {"127.0.0.1", "::1", "localhost"}
+
+
 def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -91,6 +107,10 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise HTTPException(429, "Too many requests — try again later")
         if auth_manager.is_configured:
             raise HTTPException(400, "Already configured")
+        setup_token = os.getenv("ODYSSEUS_SETUP_TOKEN", "")
+        token_ok = bool(setup_token) and request.headers.get("X-Odysseus-Setup-Token") == setup_token
+        if not (_request_from_loopback(request) or token_ok or _env_true("ODYSSEUS_ALLOW_REMOTE_SETUP")):
+            raise HTTPException(403, "First-run setup is only allowed from the app host")
         if len(body.password) < 8:
             raise HTTPException(400, "Password must be at least 8 characters")
         ok = await asyncio.to_thread(auth_manager.setup, body.username, body.password)

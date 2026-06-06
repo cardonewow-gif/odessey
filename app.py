@@ -250,6 +250,13 @@ if AUTH_ENABLED:
                 return False
         return True
 
+    def _api_token_route_allowed(path: str, method: str, scopes: list[str]) -> bool:
+        scope_set = set(scopes or [])
+        method = (method or "").upper()
+        if path == "/api/v1/chat" and method == "POST":
+            return "chat" in scope_set
+        return False
+
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             path = request.url.path
@@ -348,6 +355,11 @@ if AUTH_ENABLED:
                         request.state.api_token_id = matched_id
                         request.state.api_token_owner = matched_owner
                         request.state.api_token_scopes = matched_scopes
+                        if not _api_token_route_allowed(path, request.method, matched_scopes):
+                            return JSONResponse(
+                                status_code=403,
+                                content={"error": "API token is not allowed for this route"},
+                            )
                         return await call_next(request)
                 except Exception:
                     logger.warning("API token auth error", exc_info=False)
