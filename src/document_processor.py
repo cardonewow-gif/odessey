@@ -6,7 +6,8 @@ import logging
 import mimetypes
 import base64
 import tempfile
-from typing import List, Dict, Any
+import json
+from typing import List, Dict, Any, Optional
 
 from src.llm_core import llm_call
 
@@ -254,7 +255,170 @@ def _load_vl_settings() -> dict:
         return {}
 
 
-def _resolve_vl_model(configured: str) -> tuple:
+_VL_PREFERRED_HINTS = (
+    "qwen3-vl", "qwen2.5-vl", "qwen-2.5-vl", "qwen2-vl", "qwen-vl",
+    "nemotron-nano-12b-v2-vl", "gemini", "llama-4-scout",
+    "llama-4-maverick", "gemma-3", "mistral-small-3.2",
+    "mistral-small-3.1", "gpt-4o", "gpt-4.1", "claude-sonnet",
+    "claude-opus", "claude-haiku", "llava", "pixtral", "moondream",
+    "internvl", "cogvlm", "glm-",
+)
+
+
+def _is_free_model_id(model_id: str) -> bool:
+    return ":free" in (model_id or "").lower()
+
+
+def _is_openrouter_url(url: str) -> bool:
+    try:
+        from src.llm_core import _detect_provider
+        return _detect_provider(url or "") == "openrouter"
+    except Exception:
+        return "openrouter.ai" in (url or "").lower()
+
+
+def _vision_candidate_score(model_id: str) -> tuple:
+    lowered = (model_id or "").lower()
+    score = -100 if _is_free_model_id(lowered) else 0
+    for idx, hint in enumerate(_VL_PREFERRED_HINTS):
+        if hint in lowered:
+            score += idx
+            break
+    else:
+        score += 100
+    return score, lowered
+
+
+def _model_name_matches_configured(configured_l: str, model_l: str) -> bool:
+    if configured_l == model_l or configured_l in model_l or model_l in configured_l:
+        return True
+    compact_configured = configured_l.replace("-", "").replace("_", "")
+    compact_model = model_l.replace("-", "").replace("_", "")
+    return (
+        compact_configured == compact_model
+        or compact_configured in compact_model
+        or compact_model in compact_configured
+    )
+
+
+def _choose_cached_vision_model(
+    model_ids: list,
+    configured: str = "",
+    require_free: bool = False,
+) -> str | None:
+    configured_l = (configured or "").strip().lower()
+    candidates = []
+    try:
+        from src.chat_helpers import is_vision_model
+    except Exception:
+        is_vision_model = lambda name: False
+
+    for mid in model_ids or []:
+        if not mid:
+            continue
+        mid = str(mid)
+        mid_l = mid.lower()
+        if require_free and not _is_free_model_id(mid_l):
+            continue
+        if configured_l:
+            if _model_name_matches_configured(configured_l, mid_l):
+                candidates.append((_vision_candidate_score(mid), mid))
+            continue
+        if is_vision_model(mid):
+            candidates.append((_vision_candidate_score(mid), mid))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def _endpoint_model_ids(ep) -> list[str]:
+    raw = getattr(ep, "cached_models", None) or getattr(ep, "models", None)
+    if not raw:
+        return []
+    try:
+        models = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return []
+    if not isinstance(models, list):
+        return []
+    out = []
+    for item in models:
+        if isinstance(item, str):
+            out.append(item)
+        elif isinstance(item, dict):
+            mid = item.get("id") or item.get("name") or item.get("model")
+            if mid:
+                out.append(str(mid))
+    return out
+
+
+def _resolve_cached_vision_model(configured: str = "", owner: Optional[str] = None) -> tuple | None:
+    """Resolve a vision model from saved endpoint caches.
+
+    This makes image attachments work with a text-only chat model whenever any
+    configured endpoint has a vision-capable model, and avoids auto-picking a
+    paid model before a free OpenRouter vision model.
+    """
+    try:
+        from src.database import SessionLocal, ModelEndpoint
+        from src.endpoint_resolver import normalize_base, build_chat_url, build_headers
+    except Exception:
+        return None
+
+    candidates = []
+    db = SessionLocal()
+    try:
+        q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        if owner:
+            try:
+                from src.auth_helpers import owner_filter
+                q = owner_filter(q, ModelEndpoint, owner)
+            except Exception:
+                pass
+        endpoints = q.all()
+        for ep in endpoints:
+            base = normalize_base(getattr(ep, "base_url", "") or "")
+            selected = _choose_cached_vision_model(
+                _endpoint_model_ids(ep),
+                configured,
+                require_free=_is_openrouter_url(base),
+            )
+            if not selected:
+                continue
+            headers = build_headers(getattr(ep, "api_key", None), base)
+            candidates.append((
+                _vision_candidate_score(selected),
+                build_chat_url(base),
+                selected,
+                headers,
+            ))
+    except Exception:
+        return None
+    finally:
+        db.close()
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    _score, chat_url, model_id, headers = candidates[0]
+    return chat_url, model_id, headers
+
+
+def _openrouter_free_or_non_openrouter(candidate: tuple) -> bool:
+    try:
+        url, model_id, _headers = candidate
+    except Exception:
+        return False
+    return not _is_openrouter_url(url) or _is_free_model_id(model_id)
+
+
+def _filter_openrouter_paid_fallbacks(candidates: list) -> list:
+    return [c for c in candidates or [] if _openrouter_free_or_non_openrouter(c)]
+
+
+def _resolve_vl_model(configured: str, owner: Optional[str] = None) -> tuple:
     """Resolve the vision model to (url, model_id, headers).
 
     Uses admin-configured model if set, otherwise tries auto-detection
@@ -263,10 +427,25 @@ def _resolve_vl_model(configured: str) -> tuple:
     from src.ai_interaction import _resolve_model
 
     if configured:
-        return _resolve_model(configured)
+        try:
+            return _resolve_model(configured)
+        except ValueError:
+            cached = _resolve_cached_vision_model(configured, owner=owner)
+            if cached:
+                return cached
+            raise
 
-    # Auto-detect: try known vision-capable models in priority order
+    cached = _resolve_cached_vision_model(owner=owner)
+    if cached:
+        return cached
+
+    # Auto-detect: try known vision-capable models in priority order. OpenRouter
+    # auto-fallbacks must stay on explicitly free model ids.
     candidates = [
+        "nvidia/nemotron-nano-12b-v2-vl:free",
+        "qwen/qwen-2.5-vl-7b-instruct:free",
+        "qwen/qwen2.5-vl-72b-instruct:free",
+        "meta-llama/llama-3.2-11b-vision-instruct:free",
         "gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini",
         "claude-sonnet-4-5-20250929", "claude-opus-4-20250514",
         "gemini-2.0-flash", "gemini-2.5-pro",
@@ -274,14 +453,17 @@ def _resolve_vl_model(configured: str) -> tuple:
     ]
     for candidate in candidates:
         try:
-            return _resolve_model(candidate)
+            resolved = _resolve_model(candidate)
+            if not _openrouter_free_or_non_openrouter(resolved):
+                continue
+            return resolved
         except (ValueError, Exception):
             continue
 
     raise ValueError("No vision model available")
 
 
-def analyze_image_with_vl_result(image_path: str) -> dict:
+def analyze_image_with_vl_result(image_path: str, owner: Optional[str] = None) -> dict:
     """Analyze an image and return both text and the model that produced it."""
     logger.info(f"Analyzing image with VL model: {image_path}")
     try:
@@ -291,7 +473,7 @@ def analyze_image_with_vl_result(image_path: str) -> dict:
         vl_model = settings.get("vision_model", "")
 
         try:
-            url, model_id, headers = _resolve_vl_model(vl_model)
+            url, model_id, headers = _resolve_vl_model(vl_model, owner=owner)
         except ValueError:
             return {"text": "[No vision model configured — set one in Settings → Vision]", "model": vl_model or ""}
 
@@ -316,7 +498,9 @@ def analyze_image_with_vl_result(image_path: str) -> dict:
         # — same shape as task/chat but its own list (`vision_model_fallbacks`).
         try:
             from src.endpoint_resolver import resolve_vision_fallback_candidates
-            _vl_candidates = [(url, model_id, headers)] + resolve_vision_fallback_candidates()
+            _vl_candidates = [(url, model_id, headers)] + _filter_openrouter_paid_fallbacks(
+                resolve_vision_fallback_candidates(owner=owner)
+            )
         except Exception:
             _vl_candidates = [(url, model_id, headers)]
 
@@ -338,9 +522,9 @@ def analyze_image_with_vl_result(image_path: str) -> dict:
         return {"text": "[VL model unavailable - image not analyzed]", "model": ""}
 
 
-def analyze_image_with_vl(image_path: str) -> str:
+def analyze_image_with_vl(image_path: str, owner: Optional[str] = None) -> str:
     """Analyze an image using the admin-configured Vision-Language model."""
-    return analyze_image_with_vl_result(image_path).get("text", "")
+    return analyze_image_with_vl_result(image_path, owner=owner).get("text", "")
 
 
 def build_user_content(

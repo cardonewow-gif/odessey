@@ -39,6 +39,11 @@ function _revokePreviewUrl(f) {
   }
 }
 
+function _resetFileInput() {
+  const input = document.getElementById('file-input');
+  if (input) input.value = '';
+}
+
 /**
  * Initialize with dependencies
  */
@@ -50,6 +55,7 @@ export function init(apiBase) {
  * Open file picker dialog
  */
 export function openPicker() {
+  _resetFileInput();
   document.getElementById('file-input').click();
 }
 
@@ -184,6 +190,7 @@ export async function uploadPending() {
     const data = await res.json();
     uploaded = (data.files || []);
     pendingFiles = [];          // clear only on success
+    _resetFileInput();
     // Stash the full meta (incl. width/height for images) on the module so
     // callers that want it can grab it via getLastUploadedMeta(). Keep the
     // returned shape as `ids` for backward-compatibility with existing call sites.
@@ -264,6 +271,7 @@ export function getPendingInfo() {
 export function clearPending() {
   pendingFiles.forEach(_revokePreviewUrl);
   pendingFiles = [];
+  _resetFileInput();
   renderAttachStrip();
 }
 

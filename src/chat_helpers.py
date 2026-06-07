@@ -37,15 +37,17 @@ _VISION_MODEL_KEYWORDS = (
     "claude-sonnet", "claude-opus", "claude-haiku", "gemini",
     # open / local
     "vision", "multimodal", "llava", "bakllava", "moondream", "pixtral", "minicpm",
-    "internvl", "cogvlm", "qwen-vl", "qwen2-vl", "qwen3-vl", "qwen3vl",
+    "internvl", "cogvlm", "qwen-vl", "qwen2-vl", "qwen2.5-vl",
+    "qwen-2.5-vl", "qwen3-vl", "qwen3vl",
     # multimodal families whose names don't contain "vision"/"vl" but DO accept
     # images — without these the image is silently dropped for common Ollama tags
     # like gemma3:4b or gemma4:12b (issue #1274). Gemma 3/4 (4b+), Llama 4 (all),
     # Mistral Small 3.1/3.2, and Phi-4 multimodal are vision-capable; per the
     # err-toward-True policy (#124) a rare text-only tag being treated as vision is
     # the safer failure than silently dropping a real image.
-    "gemma-3", "gemma3", "gemma-4", "gemma4",
-    "llama-4", "llama4",
+    "gemma-3", "gemma3", "gemma-3-4b", "gemma-3-12b", "gemma-3-27b", "gemma-3n",
+    "gemma-4", "gemma4",
+    "llama-4", "llama4", "llama-4-scout", "llama-4-maverick",
     "mistral-small-3.1", "mistral-small3.1", "mistral-small-3.2", "mistral-small3.2",
     # Microsoft Phi-4 ships a dedicated multimodal variant ("phi-4-multimodal-instruct")
     # but users often load it under the bare "phi-4" or "phi4" Ollama tag.
@@ -74,6 +76,8 @@ def is_vision_model(model_name: str) -> bool:
 _PROVIDER_FINGERPRINT_TTL = 60.0
 # (host, port) -> (models_list | None, expiry); list = LM Studio, None = not LM Studio.
 _lmstudio_models_cache: dict = {}
+# (host, port) -> (OpenRouter model entries | None, expiry)
+_openrouter_models_cache: dict = {}
 
 
 def _is_local_host(host: Optional[str]) -> bool:
@@ -147,11 +151,82 @@ def lmstudio_supports_vision(url: str, model: str) -> Optional[bool]:
     return None
 
 
+def _probe_openrouter_models(url: str) -> Optional[list]:
+    """Return OpenRouter /models entries, or None when unavailable."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host != "openrouter.ai" and not host.endswith(".openrouter.ai"):
+        return None
+    key = (host, parsed.port)
+    now = time.time()
+    cached = _openrouter_models_cache.get(key)
+    if cached is not None and cached[1] > now:
+        return cached[0]
+    try:
+        from src.endpoint_resolver import normalize_base, build_models_url, build_headers
+        base = normalize_base(url)
+        r = httpx.get(build_models_url(base), headers=build_headers(None, base), timeout=2.0)
+    except Exception:
+        return None
+    try:
+        data = r.json() if r.is_success else {}
+    except Exception:
+        data = {}
+    entries = data.get("data")
+    entries = entries if isinstance(entries, list) else None
+    _openrouter_models_cache[key] = (entries, now + _PROVIDER_FINGERPRINT_TTL)
+    return entries
+
+
+def _openrouter_entry_supports_vision(entry: dict) -> Optional[bool]:
+    arch = entry.get("architecture") if isinstance(entry, dict) else None
+    if not isinstance(arch, dict):
+        return None
+    modalities = arch.get("input_modalities")
+    if isinstance(modalities, list):
+        return "image" in {str(m).lower() for m in modalities}
+    modality = str(arch.get("modality") or "").lower()
+    if modality:
+        left = modality.split("->", 1)[0]
+        return "image" in {part.strip() for part in left.split("+")}
+    return None
+
+
+def openrouter_supports_vision(url: str, model: str) -> Optional[bool]:
+    """Read OpenRouter model metadata when available.
+
+    OpenRouter exposes model input modalities, which is more reliable than
+    guessing from names such as gemma-3 or llama-4-scout.
+    """
+    if not model:
+        return None
+    entries = _probe_openrouter_models(url)
+    if not entries:
+        return None
+    want = model.strip().lower()
+    req_base = os.path.basename(want.rstrip("/"))
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        mid = str(entry.get("id") or "").lower()
+        if not mid:
+            continue
+        if want == mid or os.path.basename(mid.rstrip("/")) == req_base:
+            return _openrouter_entry_supports_vision(entry)
+    return None
+
+
 def model_supports_vision(model_name: str, endpoint_url: str = "") -> bool:
     """Whether a model accepts images, using the endpoint's reported
-    capability when available (LM Studio) and falling back to name-based
-    detection otherwise."""
+    capability when available and falling back to name-based detection
+    otherwise."""
     if endpoint_url:
+        try:
+            advertised = openrouter_supports_vision(endpoint_url, model_name or "")
+        except Exception:
+            advertised = None
+        if advertised is not None:
+            return advertised
         try:
             advertised = lmstudio_supports_vision(endpoint_url, model_name or "")
         except Exception:

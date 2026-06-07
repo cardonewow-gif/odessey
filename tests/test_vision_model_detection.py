@@ -17,6 +17,12 @@ def test_recognizes_local_and_hosted_vision_models():
         # already worked, keep them working
         "llava", "llava:7b", "bakllava", "minicpm-v",
         "gpt-4o", "claude-sonnet-4", "gemini-2.0-flash", "pixtral-12b",
+        # OpenRouter/free model IDs used as automatic image-analysis fallbacks
+        "nvidia/nemotron-nano-12b-v2-vl:free",
+        "qwen/qwen-2.5-vl-7b-instruct:free",
+        "meta-llama/llama-4-scout",
+        "google/gemma-3-27b-it",
+        "mistralai/mistral-small-3.2-24b-instruct",
     ]:
         assert is_vision_model(name), f"{name!r} should be detected as vision-capable"
 

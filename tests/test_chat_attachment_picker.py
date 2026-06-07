@@ -31,3 +31,11 @@ def test_chat_attachment_picker_allows_any_file_type():
     assert file_input["type"] == "file"
     assert "multiple" in file_input
     assert "accept" not in file_input
+
+
+def test_file_handler_resets_native_file_input_between_attachments():
+    source = (ROOT / "static" / "js" / "fileHandler.js").read_text(encoding="utf-8")
+
+    assert "function _resetFileInput()" in source
+    assert "input.value = ''" in source
+    assert "export function openPicker() {\n  _resetFileInput();" in source
