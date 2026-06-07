@@ -418,6 +418,8 @@ def _detect_provider(url: str) -> str:
         return "openrouter"
     if _host_match(url, "groq.com"):
         return "groq"
+    if _host_match(url, "venice.ai"):
+        return "venice"
     from src.copilot import is_copilot_base
     if is_copilot_base(url):
         return "copilot"
@@ -452,6 +454,7 @@ def _provider_label(url: str) -> str:
     if _host_match(url, "openai.com"): return "OpenAI"
     if _host_match(url, "openrouter.ai"): return "OpenRouter"
     if _host_match(url, "groq.com"): return "Groq"
+    if _host_match(url, "venice.ai"): return "Venice"
     from src.copilot import is_copilot_base
     if is_copilot_base(url): return "GitHub Copilot"
     if _host_match(url, "mistral.ai"): return "Mistral"

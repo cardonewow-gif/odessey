@@ -65,6 +65,8 @@ def _detect_provider(url: str) -> str:
         return "ollama"
     if "anthropic.com" in (url or ""):
         return "anthropic"
+    if "venice.ai" in (url or ""):
+        return "venice"
     return "openai"
 
 
@@ -96,6 +98,8 @@ def build_models_url(base: str) -> str:
     provider = _detect_provider(base)
     if provider == "ollama":
         return _ollama_api_root(base) + "/tags"
+    if provider == "venice":
+        return base + "/models?type=text"
     return base + "/models"
 
 
@@ -156,6 +160,9 @@ class TestBuildChatUrl:
     def test_ollama_cloud_root_adds_api(self):
         assert build_chat_url("https://ollama.com") == "https://ollama.com/api/chat"
 
+    def test_venice_openai_compatible(self):
+        assert build_chat_url("https://api.venice.ai/api/v1") == "https://api.venice.ai/api/v1/chat/completions"
+
 
 class TestBuildModelsUrl:
     def test_openai_models(self):
@@ -163,6 +170,30 @@ class TestBuildModelsUrl:
 
     def test_ollama_tags(self):
         assert build_models_url("https://ollama.com/api") == "https://ollama.com/api/tags"
+
+    def test_venice_filters_to_text_models(self):
+        assert build_models_url("https://api.venice.ai/api/v1") == "https://api.venice.ai/api/v1/models?type=text"
+
+
+class TestBuildHeadersVenice:
+    def test_venice_bearer(self):
+        assert build_headers("vn-abc", "https://api.venice.ai/api/v1") == {"Authorization": "Bearer vn-abc"}
+
+
+class TestOpenAICompatibleUnaffected:
+    """Venice's ?type=text model filter must not leak to other OpenAI-compatible providers."""
+
+    def test_generic_openai_compatible_models_url_unchanged(self):
+        # Self-hosted vLLM / LM Studio / etc. still hit plain /models
+        assert build_models_url("http://localhost:8000/v1") == "http://localhost:8000/v1/models"
+        assert build_models_url("https://api.together.xyz/v1") == "https://api.together.xyz/v1/models"
+
+    def test_generic_openai_compatible_chat_url_unchanged(self):
+        assert build_chat_url("http://localhost:8000/v1") == "http://localhost:8000/v1/chat/completions"
+
+    def test_generic_openai_compatible_detected_as_openai(self):
+        assert _detect_provider("http://localhost:8000/v1") == "openai"
+        assert _detect_provider("https://api.together.xyz/v1") == "openai"
 
 
 class TestBuildHeaders:

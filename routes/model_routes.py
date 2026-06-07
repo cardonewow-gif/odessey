@@ -285,6 +285,7 @@ _HOST_TO_CURATED = (
     ("x.ai", "xai"),
     ("openrouter.ai", "openrouter"),
     ("ollama.com", "ollama"),
+    ("venice.ai", "venice"),
 )
 
 
@@ -308,7 +309,9 @@ def _match_provider_curated(base_url: str, provider: str) -> str:
 def _curate_models(model_ids, provider):
     """Partition model_ids into (curated, extra) based on provider's curated list.
     If no curated list exists for the provider, returns (model_ids, [])."""
-    if provider == "openrouter":
+    # Providers with large/dynamic catalogs already filtered upstream
+    # (e.g. Venice via ?type=text) — show everything as curated, no subset.
+    if provider in ("openrouter", "venice"):
         return model_ids, []
     curated_list = _PROVIDER_CURATED.get(provider)
     if not curated_list:

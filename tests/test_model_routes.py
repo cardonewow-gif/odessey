@@ -23,7 +23,7 @@ if "core.database" not in sys.modules:
         "SessionLocal", "ModelEndpoint", "Session", "ChatMessage", "Document",
         "DocumentVersion", "GalleryImage", "GalleryAlbum", "Note",
         "CalendarCal", "CalendarEvent", "ScheduledTask", "TaskRun",
-        "McpServer",
+        "McpServer", "utcnow_naive",
     ]:
         setattr(_core_db, _name, MagicMock())
     sys.modules["core.database"] = _core_db
