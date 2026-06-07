@@ -21,7 +21,7 @@ _REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]
 # folder name (no slash), e.g. `DeepSeek-R1-UD-IQ4_XS`. The serve command uses
 # the real on-disk path separately; this identifier is only for UI/task
 # bookkeeping, so serving should accept the same safe glyph set as repo IDs.
-_LOCAL_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_LOCAL_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-\/\\]*$")
 # Ollama model names include tags, e.g. `qwen2.5:0.5b` or `llama3.2:latest`.
 # Some registries also use a namespace path. Keep this shell-safe: no spaces,
 # quotes, `$`, `;`, `&`, pipes, or redirects.
@@ -39,9 +39,9 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SSH_PORT_RE = re.compile(r"^\d{1,5}$")
 _GPU_LIST_RE = re.compile(r"^\d+(?:,\d+)*$")
 # A download target directory. Absolute or ~-relative path; safe path glyphs
-# only (no quotes, shell metacharacters, or spaces) since it lands in a shell
+# only (no quotes or shell metacharacters) since it lands in a shell
 # command. A leading ~ is expanded to $HOME at command-build time.
-_LOCAL_DIR_RE = re.compile(r"^~?/[A-Za-z0-9._/-]*$|^~$")
+_LOCAL_DIR_RE = re.compile(r"^~?/[A-Za-z0-9._/ -]*$|^~$|^[A-Za-z]:[\\/][A-Za-z0-9._/\\ -]*$")
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
@@ -127,7 +127,7 @@ def _shell_path(p: str) -> str:
         return '"$HOME"'
     if p.startswith("~/"):
         return '"$HOME/' + p[2:] + '"'
-    return '"' + p + '"'
+    return '"' + p.replace("\\", "\\\\") + '"'
 
 
 def _local_tooling_path_export(executable: str) -> str:
@@ -274,7 +274,7 @@ def _user_shell_path_bootstrap() -> list[str]:
         '  ODYSSEUS_USER_PATH="$("$ODYSSEUS_USER_SHELL" -ic \'printf "__ODYSSEUS_PATH__%s\\n" "$PATH"\' 2>/dev/null | sed -n \'s/^__ODYSSEUS_PATH__//p\' | tail -n 1 || true)"',
         '  if [ -n "$ODYSSEUS_USER_PATH" ]; then export PATH="$ODYSSEUS_USER_PATH:$PATH"; fi',
         'fi',
-        'command -v python3 >/dev/null 2>&1 || python3() { python "$@"; }',
+        'if ! command -v python3 >/dev/null 2>&1 || ! python3 -V >/dev/null 2>&1; then python3() { python "$@"; }; fi',
     ]
 
 

@@ -296,7 +296,12 @@ def setup_cookbook_routes() -> APIRouter:
         _dl_short = req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id
         _dl_base = (req.local_dir.rstrip("/") + "/" + _dl_short) if req.local_dir else None
         _dl_shell = _shell_path(_dl_base) if _dl_base else None      # for hf CLI / bash
-        _dl_pyarg = (", local_dir=os.path.expanduser(" + repr(_dl_base) + ")") if _dl_base else ""
+        _dl_pyarg = ""
+        if req.include:
+            _dl_pyarg += f", allow_patterns={repr(req.include)}"
+        if _dl_base:
+            _dl_py_safe = _dl_base.replace('\\', '/')
+            _dl_pyarg += f", local_dir=os.path.expanduser({repr(_dl_py_safe)})"
 
         # Build the hf download command. Redirection to suppress the interactive
         # "update available? [Y/n]" prompt is added per-platform further down
@@ -325,7 +330,7 @@ def setup_cookbook_routes() -> APIRouter:
         # throughput. Retries set disable_hf_transfer to fall back to the plain,
         # slower-but-reliable downloader (resumes cleanly from the .incomplete files).
         # Use `python3 -m pip` not `pip` — macOS has no bare `pip` command.
-        lines.append(f"command -v hf >/dev/null 2>&1 || {_pip_install_fallback_chain('huggingface_hub', upgrade=True)}")
+        lines.append(f"hf --help >/dev/null 2>&1 || {_pip_install_fallback_chain('huggingface_hub', upgrade=True)}")
         if req.disable_hf_transfer:
             lines.append("export HF_HUB_ENABLE_HF_TRANSFER=0")
             lines.append("export HF_HUB_DOWNLOAD_MAX_WORKERS=4")
@@ -362,8 +367,8 @@ def setup_cookbook_routes() -> APIRouter:
                 ps_lines.append(_safe_env_prefix(req.env_prefix))
             # Try hf CLI, fall back to Python huggingface_hub, then auto-install
             ps_lines.append('try {{')
-            ps_lines.append('  $hfPath = Get-Command hf -ErrorAction SilentlyContinue')
-            ps_lines.append('  if ($hfPath) {{')
+            ps_lines.append('  hf --help 2>$null')
+            ps_lines.append('  if ($LASTEXITCODE -eq 0) {{')
             # Pipe $null to stdin to suppress interactive "update available? [Y/n]" prompt
             ps_lines.append(f'    $null | {hf_cmd}')
             ps_lines.append('  }} else {{')
@@ -430,7 +435,7 @@ def setup_cookbook_routes() -> APIRouter:
             # hf_transfer because the Rust parallel path is fast but has been
             # flaky near the end of very large multi-file downloads.
             # Use --break-system-packages on PEP-668 systems (Arch, newer Debian) so it doesn't bail.
-            runner_lines.append(f"command -v hf >/dev/null 2>&1 || {_pip_install_fallback_chain('huggingface_hub', python_cmd='pip', upgrade=True)}")
+            runner_lines.append(f"hf --help >/dev/null 2>&1 || {_pip_install_fallback_chain('huggingface_hub', python_cmd='pip', upgrade=True)}")
             if req.disable_hf_transfer:
                 runner_lines.append("export HF_HUB_ENABLE_HF_TRANSFER=0")
                 runner_lines.append("export HF_HUB_DOWNLOAD_MAX_WORKERS=4")
@@ -443,7 +448,7 @@ def setup_cookbook_routes() -> APIRouter:
             # token (the token is masked — we only print applied / not-set).
             runner_lines.append(_HF_TOKEN_STATUS_SNIPPET)
             # Try hf CLI first, fall back to Python huggingface_hub, then auto-install
-            runner_lines.append('if command -v hf &>/dev/null; then')
+            runner_lines.append('if hf --help &>/dev/null; then')
             # < /dev/null suppresses interactive "update available? [Y/n]" prompt
             runner_lines.append(f'  {hf_cmd} < /dev/null')
             runner_lines.append('elif python3 -c "import huggingface_hub" 2>/dev/null; then')
@@ -487,15 +492,28 @@ def setup_cookbook_routes() -> APIRouter:
             # Show whether the HF token reached this run (masked) — tells a gated
             # "not authorized" failure apart from a missing token.
             lines.append(_HF_TOKEN_STATUS_SNIPPET)
+            lines.append('if hf --help &>/dev/null; then')
             if IS_WINDOWS:
-                # Detached path: no controlling TTY, so skip `< /dev/null`
-                # (handled by Popen stdin=DEVNULL) and don't keep a shell open.
-                lines.append(hf_cmd)
-                lines.append('_ec=$?; if [ $_ec -eq 0 ]; then echo ""; echo "DOWNLOAD_OK"; else echo ""; echo "DOWNLOAD_FAILED (exit $_ec)"; fi')
+                lines.append(f"  {hf_cmd}")
             else:
-                # < /dev/null suppresses interactive "update available? [Y/n]" prompt
-                lines.append(f"{hf_cmd} < /dev/null")
-                lines.append('_ec=$?; if [ $_ec -eq 0 ]; then echo ""; echo "DOWNLOAD_OK"; else echo ""; echo "DOWNLOAD_FAILED (exit $_ec)"; fi')
+                lines.append(f"  {hf_cmd} < /dev/null")
+            lines.append('elif python3 -c "import huggingface_hub" 2>/dev/null; then')
+            lines.append('  echo "hf CLI not found, using Python huggingface_hub..."')
+            lines.append(f'  python3 -c "import os; from huggingface_hub import snapshot_download; snapshot_download(\'{req.repo_id}\'{_dl_pyarg}, max_workers={4 if req.disable_hf_transfer else 8})"')
+            lines.append('else')
+            lines.append('  echo "Installing huggingface-hub and dependencies..."')
+            lines.append('  python3 -m pip install --no-deps -q huggingface-hub 2>/dev/null')
+            if req.disable_hf_transfer:
+                lines.append('  python3 -m pip install -q filelock fsspec packaging pyyaml tqdm typer httpx requests 2>/dev/null')
+                lines.append('  export HF_HUB_ENABLE_HF_TRANSFER=0')
+            else:
+                lines.append('  python3 -m pip install -q filelock fsspec packaging pyyaml tqdm typer httpx requests hf_transfer 2>/dev/null')
+                lines.append("  python3 -c 'import hf_transfer' 2>/dev/null && export HF_HUB_ENABLE_HF_TRANSFER=1")
+            lines.append(f'  python3 -c "import os; from huggingface_hub import snapshot_download; snapshot_download(\'{req.repo_id}\'{_dl_pyarg}, max_workers={4 if req.disable_hf_transfer else 8})"')
+            lines.append('fi')
+            lines.append('_ec=$?; if [ $_ec -eq 0 ]; then echo ""; echo "DOWNLOAD_OK"; else echo ""; echo "DOWNLOAD_FAILED (exit $_ec)"; fi')
+
+            if not IS_WINDOWS:
                 lines.append(f"rm -f '{wrapper_script}'")
                 lines.append('exec "${SHELL:-/bin/bash}"')
                 wrapper_script.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1219,10 +1237,10 @@ def setup_cookbook_routes() -> APIRouter:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await proc.wait()
+            stdout_bytes, stderr_bytes = await proc.communicate()
 
             if proc.returncode != 0:
-                stderr = (await proc.stderr.read()).decode(errors="replace")
+                stderr = stderr_bytes.decode(errors="replace")
                 return {"ok": False, "error": stderr, "session_id": session_id}
 
         # Auto-register a model endpoint so the served model shows up in the model
