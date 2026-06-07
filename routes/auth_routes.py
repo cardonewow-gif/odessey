@@ -1,6 +1,7 @@
 """Authentication routes — login, logout, signup, status, user management."""
 
 from fastapi import APIRouter, Request, Response, HTTPException
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import Optional
 import asyncio
@@ -8,6 +9,7 @@ import logging
 import os
 
 from core.auth import AuthManager
+from core.oauth import OAuthManager
 from src.rate_limiter import RateLimiter
 from src.settings_scrub import scrub_settings
 from src.settings import (
@@ -30,6 +32,9 @@ from src.integrations import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Module-level reference for OAuthManager (set by setup_auth_routes)
+_oauth_manager: Optional[OAuthManager] = None
 
 
 class LoginRequest(BaseModel):
@@ -73,8 +78,15 @@ class SetOpenRegistrationRequest(BaseModel):
 SESSION_COOKIE = "odysseus_session"
 
 
-def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
+def setup_auth_routes(auth_manager: AuthManager, oauth_manager: Optional[OAuthManager] = None) -> APIRouter:
     router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+    # Load OIDC config
+    if oauth_manager is None:
+        oauth_manager = OAuthManager()
+        oauth_manager.load_config()
+    global _oauth_manager
+    _oauth_manager = oauth_manager
 
     _login_limiter = RateLimiter(max_requests=15, window_seconds=60)
     _signup_limiter = RateLimiter(max_requests=3, window_seconds=300)
@@ -620,5 +632,147 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         if result.get("exit_code", 1) == 0:
             return {"ok": True, "message": "Connection successful"}
         return {"ok": False, "message": (result.get("error") or "Connection failed")[:300]}
+
+    # ---- OAuth / OIDC routes ----
+
+    @router.get("/oidc/settings")
+    async def get_oidc_settings():
+        """Return OIDC settings for the frontend (public)."""
+        om: OAuthManager = _oauth_manager
+        if om is None:
+            return {"enabled": False, "is_configured": False}
+        return om.get_oidc_settings()
+
+    @router.get("/oauth/login")
+    async def oauth_login(request: Request, redirect: str = ""):
+        """Redirect to the IdP's authorize endpoint."""
+        om: OAuthManager = _oauth_manager
+        if om is None or not om.config.is_configured:
+            raise HTTPException(400, "OAuth not configured")
+
+        # Auto-discover endpoints if discovery_url is set
+        if om.config.discovery_url:
+            await om.config.discover()
+
+        # Build the redirect_uri from the request
+        redirect_uri = str(request.url_for("oauth_callback"))
+
+        try:
+            authorize_url = await om.get_authorize_url(redirect_uri)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+        return RedirectResponse(url=authorize_url, status_code=302)
+
+    @router.get("/oauth/callback")
+    async def oauth_callback(request: Request, response: Response,
+                             code: str = "", state: str = "", error: str = ""):
+        """Handle the OAuth callback from the IdP."""
+        om: OAuthManager = _oauth_manager
+        if om is None or not om.config.is_configured:
+            return RedirectResponse(url="/login", status_code=302)
+
+        if error:
+            # IdP returned an error
+            err_desc = request.query_params.get("error_description", error)
+            return RedirectResponse(
+                url=f"/login?oidc_error={err_desc}", status_code=302
+            )
+
+        if not code or not state:
+            return RedirectResponse(url="/login", status_code=302)
+
+        # Validate state FIRST (before any network calls) to prevent
+        # CSRF and replay attacks. get_state() also prunes expired entries.
+        state_data = om.get_state(state)
+        if not state_data:
+            return RedirectResponse(
+                url="/login?oidc_error=Invalid or expired state parameter",
+                status_code=302,
+            )
+
+        # Use base URL without query params — IdP validates that this
+        # redirect_uri matches the one from the authorization request.
+        redirect_uri = str(request.url).split("?")[0]
+
+        try:
+            logger.info(f"OAuth callback: code={code[:10]}..., state={state[:10]}..., redirect_uri={redirect_uri}")
+            # Exchange code for tokens (includes PKCE code_verifier validation)
+            token_data = await om.exchange_code(code, redirect_uri, state)
+            access_token = token_data.get("access_token", "")
+            id_token = token_data.get("id_token", "")
+
+            if not access_token:
+                return RedirectResponse(
+                    url="/login?oidc_error=No access token received",
+                    status_code=302,
+                )
+
+            # Fetch userinfo
+            userinfo = await om.get_userinfo(access_token)
+            logger.info(f"OAuth callback: userinfo={userinfo}")
+
+            # SECURITY: validate issuer matches discovery document
+            om.validate_response(userinfo, id_token)
+
+            # Extract username
+            username = om.get_username_from_claims(userinfo)
+            logger.info(f"OAuth callback: username={username}")
+
+            # Get or create user (uses OAuth config for first_user_admin, etc.)
+            om.get_or_create_user(
+                username, userinfo, auth_manager
+            )
+
+            # Create session — oidc=True stores OIDC metadata inside
+            # auth_manager._sessions_lock so sessions.json stays consistent.
+            # Do NOT mutate sessions.json directly outside the lock.
+            logger.info(f"OAuth callback: creating session for {username}")
+            token = auth_manager.create_session(username, "oidc", oidc=True)
+            logger.info(f"OAuth callback: session token={token}")
+            if not token:
+                return RedirectResponse(
+                    url="/login?oidc_error=Session creation failed",
+                    status_code=302,
+                )
+
+            # Set session cookie on the redirect response
+            redirect = RedirectResponse(url="/", status_code=302)
+            redirect.set_cookie(
+                key=SESSION_COOKIE,
+                value=token,
+                httponly=True,
+                samesite="lax",
+                secure=os.getenv("SECURE_COOKIES", "false").lower() == "true",
+                path="/",
+                max_age=60 * 60 * 24 * 7,  # 7 days
+            )
+            return redirect
+
+        except ValueError as e:
+            return RedirectResponse(
+                url=f"/login?oidc_error={str(e)}",
+                status_code=302,
+            )
+        except Exception as e:
+            logger.error(f"OAuth callback error: {e}", exc_info=True)
+            return RedirectResponse(
+                url="/login?oidc_error=Authentication failed",
+                status_code=302,
+            )
+
+    @router.get("/oauth/logout")
+    async def oauth_logout(request: Request, response: Response):
+        """Log out and optionally redirect to IdP logout."""
+        om: OAuthManager = _oauth_manager
+        token = request.cookies.get(SESSION_COOKIE)
+        if token:
+            auth_manager.revoke_token(token)
+        response.delete_cookie(SESSION_COOKIE, path="/")
+
+        # Redirect to IdP logout if configured
+        if om and om.config.logout_url:
+            return RedirectResponse(url=om.config.logout_url, status_code=302)
+        return RedirectResponse(url="/login", status_code=302)
 
     return router

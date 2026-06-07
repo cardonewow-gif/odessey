@@ -1,0 +1,472 @@
+"""OAuth / OIDC manager — Authentik, Keycloak, etc.
+
+Uses authlib for the OIDC flow.  On login the browser is redirected to the
+IdP's authorize endpoint; on callback the code is exchanged for tokens,
+userinfo is fetched, and a session cookie is issued (same mechanism as the
+password flow).
+
+User accounts are auto-created on first login by default.  Admin role is
+determined by OAUTH_DEFAULT_ROLE unless the user belongs to one of the
+OAUTH_GROUPS_ADMIN groups.
+"""
+
+import hashlib
+import json
+import logging
+import os
+import secrets
+import time
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
+
+import httpx
+
+from src.settings import load_settings
+
+logger = logging.getLogger(__name__)
+
+# State entries expire after this many seconds to bound memory usage and
+# prevent stale CSRF state from being accepted indefinitely.
+_STATE_TTL_SECONDS = 600  # 10 minutes
+
+
+class OAuthConfig:
+    """Holds OIDC configuration from settings + env."""
+
+    def __init__(self):
+        self.enabled: bool = False
+        self.provider_name: str = "OAuth"
+        self.client_id: str = ""
+        self.client_secret: str = ""
+        self.authorize_url: str = ""
+        self.token_url: str = ""
+        self.userinfo_url: str = ""
+        self.jwks_url: str = ""
+        self.scopes: str = "openid email profile"
+        self.auto_create_user: bool = True
+        self.default_role: str = "user"
+        self.username_claim: str = "preferred_username"
+        self.email_claim: str = "email"
+        self.groups_claim: str = "groups"
+        self.groups_admin: List[str] = []
+        self.first_user_admin: bool = False
+        self.logout_url: str = ""
+        self.redirect_uri: str = ""
+        self.discovery_url: str = ""
+        self.issuer: str = ""  # from discovery document, used for token validation
+        self._discovery_cache: Optional[Dict[str, Any]] = None
+        self._discovery_time: float = 0
+
+    def load(self, settings: Optional[Dict[str, Any]] = None):
+        """Load configuration from settings dict (or env fallback)."""
+        if settings is None:
+            settings = load_settings()
+
+        self.enabled = settings.get("oauth_enabled", False)
+        self.provider_name = settings.get("oauth_provider_name", "OAuth")
+        self.client_id = settings.get("oauth_client_id", "")
+        self.client_secret = settings.get("oauth_client_secret", "")
+        self.authorize_url = settings.get("oauth_authorize_url", "")
+        self.token_url = settings.get("oauth_token_url", "")
+        self.userinfo_url = settings.get("oauth_userinfo_url", "")
+        self.jwks_url = settings.get("oauth_jwks_url", "")
+        self.scopes = settings.get("oauth_scopes", "openid email profile")
+        self.auto_create_user = settings.get("oauth_auto_create_user", True)
+        self.default_role = settings.get("oauth_default_role", "user")
+        self.username_claim = settings.get("oauth_username_claim", "preferred_username")
+        self.email_claim = settings.get("oauth_email_claim", "email")
+        self.groups_claim = settings.get("oauth_groups_claim", "groups")
+        self.groups_admin = settings.get("oauth_groups_admin", []) or []
+        self.first_user_admin = settings.get("oauth_first_user_admin", False)
+        self.logout_url = settings.get("oauth_logout_url", "")
+
+        # Build redirect_uri from request if not set
+        if not self.redirect_uri:
+            # Will be set dynamically; default to /api/auth/oauth/callback
+            self.redirect_uri = ""
+
+        # Env var overrides
+        if os.getenv("OAUTH_ENABLED", "").lower() in ("true", "1", "yes"):
+            self.enabled = True
+        if os.getenv("OAUTH_PROVIDER_NAME"):
+            self.provider_name = os.getenv("OAUTH_PROVIDER_NAME")
+        if os.getenv("OAUTH_CLIENT_ID"):
+            self.client_id = os.getenv("OAUTH_CLIENT_ID")
+        if os.getenv("OAUTH_CLIENT_SECRET"):
+            self.client_secret = os.getenv("OAUTH_CLIENT_SECRET")
+        if os.getenv("OAUTH_AUTHORIZE_URL"):
+            self.authorize_url = os.getenv("OAUTH_AUTHORIZE_URL")
+        if os.getenv("OAUTH_TOKEN_URL"):
+            self.token_url = os.getenv("OAUTH_TOKEN_URL")
+        if os.getenv("OAUTH_USERINFO_URL"):
+            self.userinfo_url = os.getenv("OAUTH_USERINFO_URL")
+        if os.getenv("OAUTH_JWKS_URL"):
+            self.jwks_url = os.getenv("OAUTH_JWKS_URL")
+        if os.getenv("OAUTH_SCOPES"):
+            self.scopes = os.getenv("OAUTH_SCOPES")
+        if os.getenv("OAUTH_AUTO_CREATE_USER", "").lower() in ("false", "0", "no"):
+            self.auto_create_user = False
+        if os.getenv("OAUTH_DEFAULT_ROLE"):
+            self.default_role = os.getenv("OAUTH_DEFAULT_ROLE")
+        if os.getenv("OAUTH_USERNAME_CLAIM"):
+            self.username_claim = os.getenv("OAUTH_USERNAME_CLAIM")
+        if os.getenv("OAUTH_EMAIL_CLAIM"):
+            self.email_claim = os.getenv("OAUTH_EMAIL_CLAIM")
+        if os.getenv("OAUTH_GROUPS_CLAIM"):
+            self.groups_claim = os.getenv("OAUTH_GROUPS_CLAIM")
+        if os.getenv("OAUTH_GROUPS_ADMIN"):
+            self.groups_admin = [g.strip() for g in os.getenv("OAUTH_GROUPS_ADMIN", "").split(",") if g.strip()]
+        if os.getenv("OAUTH_FIRST_USER_ADMIN", "").lower() in ("true", "1", "yes"):
+            self.first_user_admin = True
+        if os.getenv("OAUTH_LOGOUT_URL"):
+            self.logout_url = os.getenv("OAUTH_LOGOUT_URL")
+        if os.getenv("OAUTH_DISCOVERY_URL"):
+            self.discovery_url = os.getenv("OAUTH_DISCOVERY_URL")
+
+    def _validate_issuer(self, userinfo: Dict[str, Any], id_token: Optional[str] = None) -> bool:
+        """Validate that the response came from the expected issuer.
+
+        If discovery was used, the issuer from the discovery document must
+        match. If no discovery was used (manual endpoints), we skip issuer
+        validation since there is no ground truth to compare against.
+        """
+        if not self.issuer:
+            # No discovery document loaded — nothing to validate against.
+            return True
+        # Some IdPs include `iss` in userinfo; others only in the ID token.
+        # We accept either.
+        userinfo_iss = userinfo.get("iss", "")
+        if userinfo_iss and userinfo_iss != self.issuer:
+            logger.warning(
+                f"Issuer mismatch: userinfo iss='{userinfo_iss}' "
+                f"!= discovery issuer='{self.issuer}'"
+            )
+            return False
+        return True
+
+    @property
+    def is_configured(self) -> bool:
+        # Discovery URL alone is sufficient — endpoints will be resolved
+        if self.enabled and self.client_id and self.client_secret and self.discovery_url:
+            return True
+        return (
+            self.enabled
+            and self.client_id
+            and self.client_secret
+            and self.authorize_url
+            and self.token_url
+        )
+
+    async def discover(self) -> Dict[str, Any]:
+        """Fetch OIDC discovery document and auto-configure endpoints.
+
+        If discovery_url is set, it is used directly. Otherwise the system
+        tries the well-known endpoint derived from authorize_url.
+        """
+        now = time.monotonic()
+        if self._discovery_cache and (now - self._discovery_time) < 300:
+            return self._discovery_cache
+
+        # Determine which URL to hit
+        discovery_target = self.discovery_url
+        if not discovery_target:
+            # Derive from authorize_url (Authentik style)
+            base = self.authorize_url.rsplit("/", 1)[0]
+            discovery_target = f"{base}/.well-known/openid-configuration"
+
+        if not discovery_target:
+            self._discovery_cache = {}
+            self._discovery_time = now
+            return {}
+
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                resp = await client.get(discovery_target)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    self._discovery_cache = data
+                    self._discovery_time = now
+
+                    # Auto-configure endpoints from discovery document
+                    if "authorization_endpoint" in data and not self.authorize_url:
+                        self.authorize_url = data["authorization_endpoint"]
+                    if "token_endpoint" in data and not self.token_url:
+                        self.token_url = data["token_endpoint"]
+                    if "userinfo_endpoint" in data and not self.userinfo_url:
+                        self.userinfo_url = data["userinfo_endpoint"]
+                    if "jwks_uri" in data and not self.jwks_url:
+                        self.jwks_url = data["jwks_uri"]
+                    if "end_session_endpoint" in data and not self.logout_url:
+                        self.logout_url = data["end_session_endpoint"]
+                    if "revocation_endpoint" in data:
+                        pass  # store if needed later
+                    if "issuer" in data:
+                        self.issuer = data["issuer"]
+
+                    logger.info(f"OIDC discovery successful: {discovery_target}")
+                    return data
+        except Exception as e:
+            logger.debug(f"OIDC discovery failed (using manual config): {e}")
+
+        self._discovery_cache = {}
+        self._discovery_time = now
+        return {}
+
+
+class OAuthManager:
+    """Manages the OAuth/OIDC authentication flow."""
+
+    def __init__(self):
+        self.config = OAuthConfig()
+        # state_param -> {nonce, redirect, code_verifier, created_at}
+        self._state_store: Dict[str, Dict[str, Any]] = {}
+        self._state_lock = None  # lazy init
+        self._pkce_enabled: bool = True  # PKCE is on by default
+
+    def load_config(self, settings: Optional[Dict[str, Any]] = None):
+        self.config.load(settings)
+
+    def _get_state_lock(self):
+        """Thread-safe lazy init for state dict."""
+        if self._state_lock is None:
+            import threading
+            self._state_lock = threading.RLock()
+        return self._state_lock
+
+    def _prune_expired_state(self):
+        """Remove expired entries from the state store."""
+        now = time.monotonic()
+        with self._get_state_lock():
+            expired = [
+                s for s, v in self._state_store.items()
+                if now - v.get("created_at", 0) > _STATE_TTL_SECONDS
+            ]
+            for s in expired:
+                del self._state_store[s]
+            if expired:
+                logger.debug(f"Pruned {len(expired)} expired OIDC state(s)")
+
+    async def get_authorize_url(self, redirect_uri: str, state: Optional[str] = None,
+                                 nonce: Optional[str] = None) -> str:
+        """Build the authorization URL to redirect the user to.
+
+        Uses PKCE (code_challenge S256) by default for added security.
+        """
+        if not self.config.is_configured:
+            raise ValueError("OAuth not configured")
+
+        self.config.redirect_uri = redirect_uri
+
+        if state is None:
+            state = secrets.token_urlsafe(32)
+        if nonce is None:
+            nonce = secrets.token_urlsafe(32)
+
+        # PKCE: generate a code_verifier and derive code_challenge
+        code_verifier = secrets.token_urlsafe(64)
+        code_challenge = hashlib.sha256(code_verifier.encode("ascii")).digest()
+        import base64 as _base64
+        code_challenge = _base64.urlsafe_b64encode(code_challenge).decode("ascii").rstrip("=")
+
+        with self._get_state_lock():
+            self._state_store[state] = {
+                "nonce": nonce,
+                "redirect": redirect_uri,
+                "code_verifier": code_verifier,
+                "created_at": time.monotonic(),
+            }
+
+        params = {
+            "response_type": "code",
+            "client_id": self.config.client_id,
+            "redirect_uri": redirect_uri,
+            "scope": self.config.scopes,
+            "state": state,
+            "nonce": nonce,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+        }
+
+        return f"{self.config.authorize_url}?{urlencode(params)}"
+
+    async def exchange_code(self, code: str, redirect_uri: str,
+                            state: str) -> Dict[str, Any]:
+        """Exchange authorization code for tokens.
+
+        Validates PKCE code_verifier from the state store.
+        """
+        if not self.config.is_configured:
+            raise ValueError("OAuth not configured")
+
+        # PKCE: retrieve code_verifier from state (set by get_authorize_url)
+        state_data = self._state_store.get(state, {})
+        code_verifier = state_data.get("code_verifier", "")
+
+        token_body = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": self.config.client_id,
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+        }
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Try client_secret_basic first (Authorization header),
+            # then fall back to client_secret_post (form body).
+            # Many IdPs (Authentik, Keycloak) prefer basic auth.
+            for auth_method in ("basic", "post"):
+                headers = {"Content-Type": "application/x-www-form-urlencoded"}
+                body = dict(token_body)
+                if auth_method == "basic":
+                    import base64
+                    creds = f"{self.config.client_id}:{self.config.client_secret}"
+                    headers["Authorization"] = f"Basic {base64.b64encode(creds.encode()).decode()}"
+                else:
+                    body["client_secret"] = self.config.client_secret
+
+                logger.info(
+                    f"Token exchange ({auth_method}): url={self.config.token_url} "
+                    f"body={dict(body)} "
+                    f"headers={dict(headers)}"
+                )
+
+                resp = await client.post(
+                    self.config.token_url,
+                    data=body,
+                    headers=headers,
+                )
+
+                logger.info(
+                    f"Token exchange ({auth_method}) response: {resp.status_code} {resp.text[:500]}"
+                )
+
+                if resp.status_code == 200:
+                    return resp.json()
+
+                if auth_method == "basic":
+                    # Try post as fallback
+                    continue
+
+            raise ValueError(
+                f"Token exchange failed: {resp.status_code} {resp.text}"
+            )
+
+    async def get_userinfo(self, access_token: str) -> Dict[str, Any]:
+        """Fetch user info from the OIDC provider."""
+        if not self.config.userinfo_url:
+            raise ValueError("No userinfo URL configured")
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                self.config.userinfo_url,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+
+            if resp.status_code != 200:
+                logger.error(f"Userinfo fetch failed: {resp.status_code} {resp.text}")
+                raise ValueError(f"Userinfo fetch failed: {resp.status_code}")
+
+            return resp.json()
+
+    def validate_response(self, userinfo: Dict[str, Any], id_token: Optional[str] = None) -> None:
+        """Validate the OIDC response.
+
+        Checks issuer consistency. Raises ValueError on mismatch.
+        """
+        if not self.config._validate_issuer(userinfo, id_token):
+            raise ValueError(
+                "Issuer mismatch — the IdP response does not match the "
+                "expected issuer from the discovery document."
+            )
+
+    def get_username_from_claims(self, userinfo: Dict[str, Any]) -> str:
+        """Extract username from userinfo claims."""
+        username = userinfo.get(self.config.username_claim)
+        if not username:
+            # Fallback: use email or sub
+            username = userinfo.get(self.config.email_claim) or userinfo.get("sub")
+        if not username:
+            raise ValueError("No username claim found in userinfo")
+        return str(username).lower().strip()
+
+    def is_admin_from_groups(self, userinfo: Dict[str, Any]) -> bool:
+        """Check if user should be admin based on groups claim."""
+        if not self.config.groups_admin:
+            return False
+        groups = userinfo.get(self.config.groups_claim, [])
+        if isinstance(groups, str):
+            groups = [g.strip() for g in groups.split(",") if g.strip()]
+        if isinstance(groups, list):
+            return any(g in self.config.groups_admin for g in groups)
+        return False
+
+    def get_or_create_user(self, username: str, userinfo: Dict[str, Any],
+                           auth_manager) -> str:
+        """Get existing user or create one. Returns username."""
+        users = auth_manager.users
+        if username in users:
+            # User exists — check if admin role needs updating
+            user_data = users[username]
+            is_admin = user_data.get("is_admin", False)
+            # If they were previously admin via groups, keep it
+            # If they were previously non-admin, check if groups now qualify
+            if not is_admin and self.is_admin_from_groups(userinfo):
+                auth_manager._config["users"][username]["is_admin"] = True
+                auth_manager._save()
+                logger.info(f"User '{username}' promoted to admin via groups")
+            return username
+
+        # Auto-create user if enabled
+        if not self.config.auto_create_user:
+            raise ValueError(
+                f"User '{username}' not found and auto-create is disabled"
+            )
+
+        # Determine admin role: groups > first_user_admin > default_role
+        is_admin = self.is_admin_from_groups(userinfo)
+        if not is_admin and self.config.first_user_admin and len(users) == 0:
+            is_admin = True
+        if not is_admin:
+            is_admin = self.config.default_role == "admin"
+
+        auth_manager.create_user(username, password="", is_admin=is_admin)
+        logger.info(f"Auto-created OIDC user '{username}' (admin={is_admin})")
+        return username
+
+    def get_state(self, state: str) -> Optional[Dict[str, Any]]:
+        """Retrieve and remove a state entry.
+
+        Also prunes other expired entries to bound memory usage.
+        """
+        self._prune_expired_state()
+        with self._get_state_lock():
+            return self._state_store.pop(state, None)
+
+    def get_oidc_settings(self) -> Dict[str, Any]:
+        """Return OIDC settings for the frontend (secrets masked).
+
+        SECURITY: client_secret must never be sent to the browser.
+        """
+        return {
+            "enabled": self.config.enabled,
+            "provider_name": self.config.provider_name,
+            "client_id": self.config.client_id,
+            "client_secret": "****" if self.config.client_secret else "",  # SECURITY: mask secret
+            "authorize_url": self.config.authorize_url,
+            "token_url": self.config.token_url,
+            "userinfo_url": self.config.userinfo_url,
+            "jwks_url": self.config.jwks_url,
+            "scopes": self.config.scopes,
+            "auto_create_user": self.config.auto_create_user,
+            "default_role": self.config.default_role,
+            "username_claim": self.config.username_claim,
+            "email_claim": self.config.email_claim,
+            "groups_claim": self.config.groups_claim,
+            "groups_admin": self.config.groups_admin,
+            "first_user_admin": self.config.first_user_admin,
+            "logout_url": self.config.logout_url,
+            "redirect_uri": self.config.redirect_uri,
+            "discovery_url": self.config.discovery_url,
+            "issuer": self.config.issuer,
+            "is_configured": self.config.is_configured,
+        }

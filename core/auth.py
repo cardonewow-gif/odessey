@@ -442,17 +442,39 @@ class AuthManager:
             return False
         return _verify_password(password, self.users[username]["password_hash"])
 
-    def create_session(self, username: str, password: str) -> Optional[str]:
-        """Verify credentials and return a session token, or None."""
+    def create_session(
+        self,
+        username: str,
+        password: str,
+        *,
+        oidc: bool = False,
+    ) -> Optional[str]:
+        """Verify credentials and return a session token, or None.
+
+        For OIDC users (password='oidc'), skip bcrypt verification since
+        they have an empty password hash.
+
+        Args:
+            oidc: If True, mark the session as OIDC-derived. This is stored
+                inside the sessions_lock so the on-disk sessions.json is
+                consistent — callers must NOT mutate sessions.json themselves.
+        """
         username = username.strip().lower()
-        if not self.verify_password(username, password):
+        if username not in self.users:
             return None
+        # OIDC session — skip password check
+        if password != "oidc":
+            if not _verify_password(password, self.users[username]["password_hash"]):
+                return None
         token = secrets.token_hex(32)
         with self._sessions_lock:
             self._sessions[token] = {
                 "username": username,
                 "expiry": time.time() + TOKEN_TTL,
             }
+            if oidc:
+                self._sessions[token]["oidc"] = True
+                self._sessions[token]["oidc_username"] = username
         self._save_sessions()
         return token
 
@@ -511,6 +533,33 @@ class AuthManager:
             self._sessions.pop(token, None)
         self._save_sessions()
 
+    def get_or_create_user(self, username: str, userinfo: Dict[str, Any],
+                           oauth_config) -> Optional[str]:
+        """Get existing user or auto-create one from OIDC userinfo.
+
+        Returns the username on success, or None if auto-create is disabled
+        and the user doesn't exist.
+        """
+        username = username.strip().lower()
+        if username in self.users:
+            # User exists — check if admin role needs updating
+            user_data = self.users[username]
+            is_admin = user_data.get("is_admin", False)
+            # If they were previously non-admin, check if groups now qualify
+            if not is_admin and oauth_config.is_admin_from_groups(userinfo):
+                self._config["users"][username]["is_admin"] = True
+                self._save()
+                logger.info(f"User '{username}' promoted to admin via OIDC groups")
+            return username
+
+        # Auto-create user if enabled
+        if not oauth_config.auto_create_user:
+            return None
+
+        is_admin = oauth_config.is_admin_from_groups(userinfo) or oauth_config.default_role == "admin"
+        self.create_user(username, password="", is_admin=is_admin)
+        logger.info(f"Auto-created OIDC user '{username}' (admin={is_admin})")
+        return username
     def revoke_user_sessions(self, username: str, except_token: Optional[str] = None) -> int:
         """Revoke active browser sessions for a user, optionally preserving one."""
         username = username.strip().lower()
