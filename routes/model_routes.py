@@ -215,6 +215,50 @@ def _rewrite_loopback_for_docker(base_url: str, *, container_local: bool = False
 # ── Curated model lists per provider ──
 # For cloud providers that return 100+ models, only show these by default.
 # A model ID matches if it starts with or equals a curated entry.
+_FIREPASS_MODEL = "accounts/fireworks/routers/kimi-k2p6-turbo"
+_FIREWORKS_MODELS_URL = "https://api.fireworks.ai/v1/accounts/fireworks/models"
+
+
+def _is_firepass_setup(base_url: str, name: str = "", api_key: str = "") -> bool:
+    if not _host_match(base_url, "fireworks.ai"):
+        return False
+    label = re.sub(r"[\s_-]+", "", (name or "").lower())
+    return "firepass" in label or (api_key or "").strip().startswith("fpk_")
+
+
+def _probe_fireworks_serverless_models(api_key: str = None, timeout: int = 5) -> List[str]:
+    if not api_key:
+        return []
+    models = []
+    page_token = ""
+    for _ in range(20):
+        params = {"filter": "supports_serverless=true", "pageSize": "200"}
+        if page_token:
+            params["pageToken"] = page_token
+        try:
+            r = httpx.get(
+                _FIREWORKS_MODELS_URL,
+                headers={"Authorization": f"Bearer {api_key}"},
+                params=params,
+                timeout=timeout,
+                verify=llm_verify(),
+            )
+            r.raise_for_status()
+            data = r.json()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else "unknown"
+            logger.warning(f"Fireworks model list failed with API key: HTTP {status}")
+            return []
+        except Exception as e:
+            logger.warning(f"Fireworks model list failed with API key: {e}")
+            return []
+        models.extend(m.get("name") for m in (data.get("models") or []) if m.get("name"))
+        page_token = (data.get("nextPageToken") or "").strip()
+        if not page_token:
+            break
+    return _merge_model_ids(models, [])
+
+
 _PROVIDER_CURATED = {
     "openai": [
         "gpt-5.2", "gpt-5.2-pro", "gpt-5", "gpt-5-pro", "gpt-5-mini", "gpt-5-nano",
@@ -254,6 +298,7 @@ _PROVIDER_CURATED = {
         "Qwen/Qwen2.5-72B-Instruct-Turbo",
     ],
     "fireworks": [
+        _FIREPASS_MODEL,
         "accounts/fireworks/models/llama4-scout-instruct-basic",
         "accounts/fireworks/models/llama4-maverick-instruct-basic",
         "accounts/fireworks/models/deepseek-r1",
@@ -646,6 +691,12 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
                 return []
             logger.warning(f"Anthropic /v1/models failed, using hardcoded list: {e}")
         return list(ANTHROPIC_MODELS)
+    if _is_firepass_setup(base, api_key=api_key):
+        return [_FIREPASS_MODEL]
+    if _host_match(base, "fireworks.ai"):
+        models = _probe_fireworks_serverless_models(api_key, timeout)
+        if models or api_key:
+            return models
     url = build_models_url(base)
     headers = build_headers(api_key, base)
     try:
@@ -1506,9 +1557,14 @@ def setup_model_routes(model_discovery):
         refresh_interval = _parse_positive_int(model_refresh_interval, minimum=30, maximum=86400)
         refresh_timeout = _parse_positive_int(model_refresh_timeout, minimum=1, maximum=60)
         require_model_list = _truthy(require_models)
+        _incoming_api_key = api_key.strip()
+        firepass_setup = _is_firepass_setup(base_url, name, _incoming_api_key)
+        _pinned = _normalize_model_ids(pinned_models)
+        if firepass_setup:
+            _pinned = _merge_model_ids(_pinned, [_FIREPASS_MODEL])
         should_probe = (
             require_model_list or requested_kind in ("api", "proxy") or not _truthy(skip_probe)
-        )
+        ) and not firepass_setup
         explicit_timeout = _explicit_model_list_timeout(base_url, requested_kind, refresh_timeout)
 
         # Dedupe: if an endpoint with the same base_url and compatible
@@ -1518,7 +1574,6 @@ def setup_model_routes(model_discovery):
         # provider URL under multiple credentials.
         from src.auth_helpers import get_current_user as _gcu_dedup
         _caller = _gcu_dedup(request) or None
-        _incoming_api_key = api_key.strip()
         _db_dedup = SessionLocal()
         try:
             _same_url_rows = (
@@ -1543,11 +1598,10 @@ def setup_model_routes(model_discovery):
                 changed = False
                 # Persist any incoming pinned IDs onto the existing row. An
                 # empty/omitted form field must not wipe previously pinned IDs.
-                _incoming_pinned = _normalize_model_ids(pinned_models)
-                if _incoming_pinned:
+                if _pinned:
                     _merged_pinned = _merge_model_ids(
                         _normalize_model_ids(getattr(existing, "pinned_models", None)),
-                        _incoming_pinned,
+                        _pinned,
                     )
                     existing.pinned_models = json.dumps(_merged_pinned) if _merged_pinned else None
                     changed = True
@@ -1608,7 +1662,8 @@ def setup_model_routes(model_discovery):
         ping = {"reachable": False, "error": None}
         if (should_probe or requested_kind in ("api", "proxy")) and not model_ids:
             ping = _ping_endpoint(base_url, api_key.strip() or None, timeout=min(explicit_timeout, 2.0))
-        if require_model_list and not model_ids:
+        visible_model_ids = _merge_model_ids(model_ids, _pinned)
+        if require_model_list and not visible_model_ids:
             raise HTTPException(400, _model_endpoint_error_message(base_url, ping))
 
         ep_id = str(uuid.uuid4())[:8]
@@ -1616,7 +1671,6 @@ def setup_model_routes(model_discovery):
         try:
             _st_raw = (supports_tools or "").strip().lower()
             _st = True if _st_raw in ("true", "1", "yes") else (False if _st_raw in ("false", "0", "no") else None)
-            _pinned = _normalize_model_ids(pinned_models)
             # Stamp owner so the picker only shows this endpoint to the admin
             # who added it. Pass `shared=true` to mark it null-owner (visible
             # to all users), preserving the pre-fix "everyone sees everything"
@@ -1650,7 +1704,7 @@ def setup_model_routes(model_discovery):
             if not settings.get("default_endpoint_id"):
                 from src.endpoint_resolver import _first_chat_model
                 settings["default_endpoint_id"] = ep.id
-                settings["default_model"] = _first_chat_model(model_ids) or ""
+                settings["default_model"] = _first_chat_model(visible_model_ids) or ""
                 _save_settings(settings)
             _invalidate_models_cache()
             _local_probe_cache["data"] = None
@@ -1664,10 +1718,10 @@ def setup_model_routes(model_discovery):
             "base_url": base_url,
             "has_key": bool(api_key.strip()),
             "api_key_fingerprint": _api_key_fingerprint(api_key),
-            "models": _merge_model_ids(model_ids, _pinned),
+            "models": visible_model_ids,
             "pinned_models": _pinned,
-            "online": bool(model_ids) or bool(_pinned) or bool(ping.get("reachable")),
-            "status": "online" if (model_ids or _pinned) else ("empty" if ping.get("reachable") else "offline"),
+            "online": bool(visible_model_ids) or bool(ping.get("reachable")),
+            "status": "online" if visible_model_ids else ("empty" if ping.get("reachable") else "offline"),
             "ping_error": ping.get("error") if ping else None,
             "endpoint_kind": requested_kind,
             "category": _classify_endpoint(base_url, requested_kind),
