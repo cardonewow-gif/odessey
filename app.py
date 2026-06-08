@@ -650,6 +650,10 @@ app.include_router(calendar_router)
 from routes.shell_routes import setup_shell_routes
 app.include_router(setup_shell_routes())
 
+# Local llama.cpp model hub + serving (provisioned prebuilt binary)
+from routes.llama_routes import setup_llama_routes
+app.include_router(setup_llama_routes())
+
 # Cookbook (model download/serve/cache, cookbook state sync)
 from routes.cookbook_routes import setup_cookbook_routes
 app.include_router(setup_cookbook_routes())
