@@ -1,23 +1,25 @@
 # routes/stt_routes.py
-"""STT API routes — multi-provider (local Whisper, API endpoint, browser)."""
+"""STT API routes — local Whisper or any OpenAI-compatible endpoint."""
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 import logging
 
 from src.upload_limits import read_upload_limited
+from src.auth_helpers import require_user
 
 logger = logging.getLogger(__name__)
 
-STT_MAX_AUDIO_BYTES = 25 * 1024 * 1024
+STT_MAX_AUDIO_BYTES = 25 * 1024 * 1024   # 25 MB
 
 
 def setup_stt_routes(stt_service):
-    """Setup STT routes with the provided STT service"""
+    """Register STT routes on the FastAPI app."""
     router = APIRouter(prefix="/api/stt", tags=["stt"])
 
     @router.get("/stats")
-    async def get_stt_stats():
-        """Get STT service statistics"""
+    async def get_stt_stats(request: Request):
+        """Return current STT provider config (used by the dictate button)."""
+        require_user(request)
         try:
             return stt_service.get_stats()
         except Exception as e:
@@ -25,24 +27,34 @@ def setup_stt_routes(stt_service):
             raise HTTPException(status_code=500, detail=str(e))
 
     @router.post("/transcribe")
-    async def transcribe_audio(file: UploadFile = File(...)):
-        """Transcribe uploaded audio file to text"""
+    async def transcribe_audio(request: Request, file: UploadFile = File(...)):
+        """Transcribe uploaded audio and return the transcript text."""
+        require_user(request)
         try:
-            if not stt_service.available:
-                raise HTTPException(
-                    status_code=503,
-                    detail={"message": "STT service not available or set to browser mode"}
-                )
-
             audio_bytes = await read_upload_limited(file, STT_MAX_AUDIO_BYTES, "Audio file")
             if not audio_bytes:
                 raise HTTPException(status_code=400, detail={"message": "Empty audio file"})
 
-            text = stt_service.transcribe(audio_bytes)
+            try:
+                text = stt_service.transcribe(audio_bytes)
+            except ValueError as e:
+                # Configuration errors (e.g. missing API key)
+                raise HTTPException(status_code=422, detail={"message": str(e)})
+            except Exception as e:
+                raise HTTPException(
+                    status_code=502,
+                    detail={"message": f"Transcription provider error: {e}"}
+                )
+
             if text is None:
                 raise HTTPException(
-                    status_code=500,
-                    detail={"message": "Transcription failed"}
+                    status_code=503,
+                    detail={
+                        "message": (
+                            "STT not configured. "
+                            "Go to Settings → AI Defaults → Speech-to-Text and choose a provider."
+                        )
+                    },
                 )
 
             return {"text": text}
@@ -53,7 +65,7 @@ def setup_stt_routes(stt_service):
             logger.error(f"Transcription error: {e}", exc_info=True)
             raise HTTPException(
                 status_code=500,
-                detail={"message": f"Transcription failed: {str(e)}"}
+                detail={"message": f"Transcription failed: {e}"},
             )
 
     return router
