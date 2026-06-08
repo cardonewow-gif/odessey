@@ -53,6 +53,7 @@ from routes.email_helpers import (
     attachment_extract_dir, _email_cache_owner_clause,
 )
 from routes.email_pollers import _start_poller
+from routes.email_auth_hints import friendly_auth_error
 
 logger = logging.getLogger(__name__)
 
@@ -3163,7 +3164,7 @@ def setup_email_routes():
                     try: conn.logout()
                     except Exception: pass
             except Exception as e:
-                imap_result = {"ok": False, "error": str(e)[:200]}
+                imap_result = {"ok": False, "error": friendly_auth_error(imap_host, str(e))[:300]}
 
         smtp_host = (body.get("smtp_host") or "").strip()
         if smtp_host:
@@ -3185,7 +3186,7 @@ def setup_email_routes():
                     try: smtp.quit()
                     except Exception: pass
             except Exception as e:
-                smtp_result = {"ok": False, "error": str(e)[:200]}
+                smtp_result = {"ok": False, "error": friendly_auth_error(smtp_host, str(e))[:300]}
 
         return {
             "ok": imap_result["ok"] and (smtp_result is None or smtp_result["ok"]),
