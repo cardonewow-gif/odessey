@@ -8,6 +8,7 @@ and the task scheduler / builtin actions system.
 import json
 import logging
 import re
+
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -208,7 +209,7 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
                     db_sess = db.query(DbSession).filter(DbSession.id == full_id).first()
                     if db_sess:
                         db_sess.folder = folder_name
-                        db_sess.updated_at = datetime.utcnow()
+                        db_sess.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                         updated += 1
         db.commit()
 

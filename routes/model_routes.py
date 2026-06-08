@@ -9,7 +9,7 @@ import hashlib
 import time as _time
 import logging
 import httpx
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, urlunparse
 from fastapi import APIRouter, HTTPException, Form, Query, Body, Request, Response
@@ -2167,7 +2167,7 @@ def setup_model_routes(model_discovery):
         for row in rows:
             if _session_uses_endpoint_url(row.endpoint_url or "", base_url):
                 row.headers = {}
-                row.updated_at = datetime.utcnow()
+                row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 cleared += 1
         return cleared
 
