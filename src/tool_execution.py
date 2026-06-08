@@ -14,10 +14,13 @@ import logging
 import os
 import pathlib
 import re
+import signal
+import subprocess
 import sys
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
+from core.platform_compat import IS_WINDOWS, kill_process_tree
 from src.tool_security import is_public_blocked_tool, owner_is_admin_or_single_user
 from src.tool_policy import ToolPolicy
 from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
@@ -28,6 +31,102 @@ from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA
 # Using this as cwd and HOME prevents the agent from silently creating files
 # in ephemeral container layers that are lost on the next rebuild.
 _AGENT_WORKDIR = DATA_DIR
+
+
+def _posix_descendant_pids(root_pid: int) -> list[int]:
+    """Return a best-effort snapshot of POSIX descendants for ``root_pid``."""
+    try:
+        output = subprocess.check_output(
+            ["ps", "-eo", "pid=,ppid="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1,
+        )
+    except Exception:
+        return []
+
+    children_by_parent: dict[int, list[int]] = collections.defaultdict(list)
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children_by_parent[ppid].append(pid)
+
+    descendants: list[int] = []
+    seen: set[int] = set()
+    stack = list(children_by_parent.get(root_pid, ()))
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        descendants.append(pid)
+        stack.extend(children_by_parent.get(pid, ()))
+    return descendants
+
+
+def _kill_proc_tree(proc) -> None:
+    """Hard-kill ``proc`` and best-effort descendants.
+
+    The agent's bash/python tools can background grandchildren (``foo &``, a
+    pipeline, a dev server). ``proc.kill()`` signals only the direct child, so
+    those grandchildren get reparented to init and keep running after the user
+    hits stop — the "model in agent mode sometimes cannot be stopped" report in
+    issue #1131. The tool subprocesses are spawned with ``start_new_session``
+    so the child leads its own process group, letting us SIGKILL the whole
+    group at once. A malicious or unusual descendant can create its own session
+    before stop/timeout; snapshotting descendants before signalling the parent
+    lets us also kill those escaped groups/PIDs.
+    """
+    pid = getattr(proc, "pid", None)
+    if not pid:
+        return
+    if IS_WINDOWS:
+        # No POSIX process groups; taskkill /F /T walks and kills the tree.
+        kill_process_tree(pid)
+        return
+    descendant_pids = _posix_descendant_pids(pid)
+    current_pgid = os.getpgrp()
+    try:
+        main_pgid = os.getpgid(pid)
+    except Exception:
+        main_pgid = None
+
+    descendant_pgids: set[int] = set()
+    for child_pid in descendant_pids:
+        try:
+            child_pgid = os.getpgid(child_pid)
+        except Exception:
+            continue
+        if child_pgid not in {main_pgid, current_pgid}:
+            descendant_pgids.add(child_pgid)
+
+    try:
+        if main_pgid is not None:
+            os.killpg(main_pgid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    for child_pgid in descendant_pgids:
+        try:
+            os.killpg(child_pgid, signal.SIGKILL)
+        except Exception:
+            pass
+    for child_pid in reversed(descendant_pids):
+        if child_pid == os.getpid():
+            continue
+        try:
+            os.kill(child_pid, signal.SIGKILL)
+        except Exception:
+            pass
 
 
 def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
@@ -436,22 +535,17 @@ async def _run_subprocess_streaming(
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         timed_out = True
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        _kill_proc_tree(proc)
         try:
             await asyncio.wait_for(proc.wait(), timeout=2)
         except Exception:
             pass
     except asyncio.CancelledError:
-        # User hit stop / SSE stream torn down. Kill the child so it
-        # doesn't keep running orphaned. Re-raise so the agent loop's
-        # cancellation propagates as the user expects.
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        # User hit stop / SSE stream torn down. Kill the child AND its
+        # descendants so a backgrounded grandchild doesn't keep running
+        # orphaned (#1131). Re-raise so the agent loop's cancellation
+        # propagates as the user expects.
+        _kill_proc_tree(proc)
         try:
             await asyncio.wait_for(proc.wait(), timeout=2)
         except Exception:
@@ -682,6 +776,10 @@ async def _direct_fallback(
                 stderr=asyncio.subprocess.PIPE,
                 env=_subproc_env,
                 cwd=workspace or _AGENT_WORKDIR,
+                # Own process group so stop/timeout can kill the whole tree,
+                # not just the shell, leaving backgrounded children orphaned
+                # (#1131). POSIX-only; ignored on Windows (taskkill /T instead).
+                start_new_session=True,
             )
             stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
                 proc,
@@ -709,6 +807,9 @@ async def _direct_fallback(
                 stderr=asyncio.subprocess.PIPE,
                 env=_subproc_env,
                 cwd=workspace or _AGENT_WORKDIR,
+                # Own process group so stop/timeout kills any grandchildren the
+                # code spawned, not just the interpreter (#1131). POSIX-only.
+                start_new_session=True,
             )
             stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
                 proc,
