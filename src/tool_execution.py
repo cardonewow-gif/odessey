@@ -342,6 +342,17 @@ async def _run_subprocess_streaming(
     stderr_full: list[str] = []
     tail = collections.deque(maxlen=PROGRESS_TAIL_LINES)
 
+    async def _emit_progress():
+        if not progress_cb:
+            return
+        try:
+            await progress_cb({
+                "elapsed_s": round(time.time() - started, 1),
+                "tail": "\n".join(list(tail)),
+            })
+        except Exception:
+            pass
+
     async def _reader(stream, full_buf, label: str):
         if stream is None:
             return
@@ -349,12 +360,13 @@ async def _run_subprocess_streaming(
             line = await stream.readline()
             if not line:
                 break
-            decoded = line.decode("utf-8", errors="replace").rstrip("\n")
+            decoded = line.decode("utf-8", errors="replace").rstrip("\n\r")
             full_buf.append(decoded)
             if label == "err":
                 tail.append(f"! {decoded}")
             else:
                 tail.append(decoded)
+            await _emit_progress()
 
     async def _progress_emitter():
         # Skip the first push — many commands finish well under
@@ -362,16 +374,7 @@ async def _run_subprocess_streaming(
         # just add UI churn.
         await asyncio.sleep(PROGRESS_INTERVAL_S)
         while True:
-            if progress_cb:
-                try:
-                    await progress_cb({
-                        "elapsed_s": round(time.time() - started, 1),
-                        "tail": "\n".join(list(tail)),
-                    })
-                except Exception:
-                    # Progress is best-effort — never let a UI hiccup
-                    # break the underlying subprocess.
-                    pass
+            await _emit_progress()
             await asyncio.sleep(PROGRESS_INTERVAL_S)
 
     rd_out = asyncio.create_task(_reader(proc.stdout, stdout_full, "out"))
@@ -617,6 +620,7 @@ async def _direct_fallback(
         "COLUMNS": "120",
         "LINES": "40",
         "HOME": _AGENT_WORKDIR,
+        "PYTHONUNBUFFERED": "1",
     }
 
     try:
@@ -646,10 +650,20 @@ async def _direct_fallback(
             # Run user code in a subprocess so an infinite loop or crash
             # can't take the whole server down. -I = isolated mode (skip
             # user site, no PYTHONPATH inheritance) for hygiene.
+            # -u + line-buffered stdout so print() reaches the pipe (and
+            # tool_progress tail) while the subprocess is still running —
+            # without this, Windows/pipe mode often buffers until exit.
+            _py_code = (
+                "import sys as _sys\n"
+                "try:\n"
+                "    _sys.stdout.reconfigure(line_buffering=True)\n"
+                "except Exception:\n"
+                "    pass\n"
+            ) + content
             proc = await asyncio.create_subprocess_exec(
                 # Use the running interpreter — there is no `python3.exe` on
                 # Windows, which made the agent's `python` tool fail there.
-                (sys.executable or "python"), "-I", "-c", content,
+                (sys.executable or "python"), "-u", "-I", "-c", _py_code,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=_subproc_env,
