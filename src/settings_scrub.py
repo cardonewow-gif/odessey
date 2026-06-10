@@ -27,6 +27,8 @@ _SENSITIVE_KEY_EXACT = (
 
 
 def is_secret_key(name: str) -> bool:
+    if not isinstance(name, str):
+        return False
     n = (name or "").lower()
     if n in _SECRET_KEY_ALLOW:
         return False
