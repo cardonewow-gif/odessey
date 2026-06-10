@@ -12,6 +12,8 @@ from core.platform_compat import (
     run_ssh_command,
 )
 
+from src.url_security import validate_ssh_destination, validate_tcp_port
+
 CACHE_TTL = 24 * 3600  # 24 h — hardware probes are user-initiated via the Rescan button; bumped
                        # from 30 min so changing filters doesn't keep re-probing the rig every
                        # half-hour during a long session.
@@ -619,6 +621,12 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
     platform: "windows", "linux", "termux", or "" (auto-detect).
     """
     global _remote_host, _remote_port, _remote_platform
+
+    try:
+        host = validate_ssh_destination(host)
+        ssh_port = validate_tcp_port(ssh_port, default="")
+    except ValueError as exc:
+        return {"error": str(exc), "backend": "unknown", "has_gpu": False}
 
     cache_key = _cache_key(host, ssh_port, platform)
     now = time.time()

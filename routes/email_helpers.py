@@ -348,11 +348,17 @@ def attachment_extract_dir(folder: str, uid: str) -> Path:
     a single safe path segment so a value like folder='../../tmp' can't escape
     ATTACHMENTS_DIR, then assert containment as belt-and-suspenders."""
     key = re.sub(r"[^A-Za-z0-9._-]", "_", f"{folder}_{uid}") or "_"
+    while ".." in key:
+        key = key.replace("..", "_")
     target = (ATTACHMENTS_DIR / key).resolve()
     base = ATTACHMENTS_DIR.resolve()
     if target != base and base not in target.parents:
         raise HTTPException(400, "Invalid attachment location")
     return target
+
+
+def _safe_attachment_target_dir(folder: str, uid: str) -> Path:
+    return attachment_extract_dir(folder, uid)
 
 
 def _init_scheduled_db():
@@ -504,13 +510,16 @@ def _init_scheduled_db():
     # client uses these to fold without ever re-calling the LLM.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS email_boundaries (
-            message_id TEXT PRIMARY KEY,
+            message_id TEXT,
+            owner TEXT DEFAULT '',
             uid TEXT,
             folder TEXT,
             sig_start INTEGER,
             quote_start INTEGER,
             model_used TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            turns_json TEXT,
+            PRIMARY KEY (message_id, owner)
         )
     """)
     # Lazy migration: add account_id column to scheduled_emails if missing
@@ -551,11 +560,34 @@ def _init_scheduled_db():
                 pass
     except Exception:
         pass
-    # Lazy migration: add turns_json to email_boundaries for server-side
-    # thread parsing cache (talon-style precomputed reply chain).
+    # Lazy migration: owner-scope email_boundaries and preserve turns_json.
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(email_boundaries)").fetchall()]
-        if "turns_json" not in cols:
+        if "owner" not in cols:
+            turns_expr = "turns_json" if "turns_json" in cols else "NULL"
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS email_boundaries__new (
+                    message_id TEXT,
+                    owner TEXT DEFAULT '',
+                    uid TEXT,
+                    folder TEXT,
+                    sig_start INTEGER,
+                    quote_start INTEGER,
+                    model_used TEXT,
+                    created_at TEXT NOT NULL,
+                    turns_json TEXT,
+                    PRIMARY KEY (message_id, owner)
+                )
+            """)
+            conn.execute(
+                "INSERT OR IGNORE INTO email_boundaries__new "
+                "(message_id, owner, uid, folder, sig_start, quote_start, model_used, created_at, turns_json) "
+                f"SELECT message_id, '', uid, folder, sig_start, quote_start, model_used, created_at, {turns_expr} "
+                "FROM email_boundaries"
+            )
+            conn.execute("DROP TABLE email_boundaries")
+            conn.execute("ALTER TABLE email_boundaries__new RENAME TO email_boundaries")
+        elif "turns_json" not in cols:
             conn.execute("ALTER TABLE email_boundaries ADD COLUMN turns_json TEXT")
     except Exception:
         pass
@@ -565,14 +597,44 @@ def _init_scheduled_db():
     # future email from that address.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sender_signatures (
-            from_address TEXT PRIMARY KEY,
+            from_address TEXT,
+            owner TEXT DEFAULT '',
             signature_text TEXT,
             sample_count INTEGER,
             last_built_at TEXT NOT NULL,
             model_used TEXT,
-            source TEXT
+            source TEXT,
+            PRIMARY KEY (from_address, owner)
         )
     """)
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(sender_signatures)").fetchall()]
+        if "owner" not in cols:
+            conn.execute("ALTER TABLE sender_signatures ADD COLUMN owner TEXT DEFAULT ''")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sender_signatures__new (
+                    from_address TEXT,
+                    owner TEXT DEFAULT '',
+                    signature_text TEXT,
+                    sample_count INTEGER,
+                    last_built_at TEXT NOT NULL,
+                    model_used TEXT,
+                    source TEXT,
+                    PRIMARY KEY (from_address, owner)
+                )
+            """)
+            conn.execute("""
+                INSERT OR IGNORE INTO sender_signatures__new
+                  (from_address, owner, signature_text, sample_count, last_built_at, model_used, source)
+                SELECT from_address, COALESCE(owner, ''), signature_text, sample_count,
+                       last_built_at, model_used, source
+                FROM sender_signatures
+            """)
+            conn.execute("DROP TABLE sender_signatures")
+            conn.execute("ALTER TABLE sender_signatures__new RENAME TO sender_signatures")
+    except Exception as _mig_e:
+        import logging as _lg
+        _lg.getLogger(__name__).warning(f"sender_signatures owner-migration skipped: {_mig_e}")
     conn.commit()
     conn.close()
 

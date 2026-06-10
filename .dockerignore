@@ -9,7 +9,9 @@ __pycache__/
 dist/
 build/
 .env
-.env.bak.*
+.env.*
+!.env.example
+!.env.online.example
 /data/
 /logs/
 .git/

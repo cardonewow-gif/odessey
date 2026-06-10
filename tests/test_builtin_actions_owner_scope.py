@@ -119,12 +119,19 @@ async def test_learn_sender_signatures_resolves_llm_for_task_owner(monkeypatch):
             return None
 
     calls, _fallback_calls = _resolver_spy(monkeypatch, utility_result=("", "", {}), default_result=("", "", {}))
-    monkeypatch.setattr(email_helpers, "_imap_connect", lambda _account_id=None: FakeImap())
+    imap_calls = []
+
+    def fake_imap_connect(account_id=None, owner=""):
+        imap_calls.append((account_id, owner))
+        return FakeImap()
+
+    monkeypatch.setattr(email_helpers, "_imap_connect", fake_imap_connect)
 
     message, ok = await action_learn_sender_signatures("alice")
 
     assert ok is False
     assert message == "No LLM endpoint available"
+    assert imap_calls == [(None, "alice")]
     assert calls == [("utility", "alice"), ("default", "alice")]
 
 
