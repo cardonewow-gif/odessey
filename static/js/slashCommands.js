@@ -339,10 +339,22 @@ function _submitComposedMessage(text) {
   const msgInput = document.getElementById('message');
   const form = document.getElementById('chat-form');
   if (!msgInput || !form) return false;
-  msgInput.value = text;
-  msgInput.dispatchEvent(new Event('input', { bubbles: true }));
-  if (typeof form.requestSubmit === 'function') form.requestSubmit();
-  else form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+  // Defer past the in-flight submit turn (#3748): this runs synchronously
+  // inside handleSlashCommand, while chat.js still holds its _sendInFlight
+  // re-click guard — a synchronous requestSubmit() re-enters the submit
+  // handler, gets dropped by the guard, and chat.js then clears the input,
+  // wiping the composed prompt. A macrotask runs after the guard is released
+  // and the slash text is cleared. The composedSubmit flag lets app.js's
+  // 300ms submit debounce pass this one programmatic re-submit through —
+  // without it the composed turn dies there whenever the skill invoke
+  // round-trip is faster than the debounce window.
+  setTimeout(() => {
+    msgInput.value = text;
+    msgInput.dispatchEvent(new Event('input', { bubbles: true }));
+    form.dataset.composedSubmit = '1';
+    if (typeof form.requestSubmit === 'function') form.requestSubmit();
+    else form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+  }, 0);
   return true;
 }
 

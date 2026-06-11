@@ -3519,8 +3519,14 @@ function startOdysseusApp() {
 
   function handleSubmit(e) {
     if (e) e.preventDefault();
+    // A slash-skill composed prompt re-submits programmatically right after
+    // the user's own submit (slashCommands._submitComposedMessage, #3748).
+    // That single synthetic submit must not be eaten by the double-submit
+    // debounce below, so it announces itself via a one-shot flag.
+    const isComposedSubmit = chatForm.dataset.composedSubmit === '1';
+    if (isComposedSubmit) delete chatForm.dataset.composedSubmit;
     // Debounce: prevent double-submit while a request is being initiated
-    if (_submitting) return;
+    if (_submitting && !isComposedSubmit) return;
     _submitting = true;
     // Release after a short delay (stream start sets its own isStreaming guard)
     setTimeout(() => { _submitting = false; }, 300);
