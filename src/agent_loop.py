@@ -761,6 +761,41 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
     return False
 
 
+_IMAGE_TOOL_NAMES = {"generate_image", "edit_image"}
+
+
+def _assistant_used_image_tool(messages: List[Dict], lookback: int = 4) -> bool:
+    """True if one of the last ``lookback`` assistant turns actually used an image
+    tool (generate_image/edit_image).
+
+    A vague image follow-up ("do another", "try again to match your vision")
+    references the prior image only anaphorically, so it matches no domain keyword
+    and would hit the low_signal short-circuit that strips every tool — leaving a
+    small model to confabulate a fake generation instead of regenerating. When
+    recent image tool use is detected we re-arm the images domain. Two signals:
+    the recorded tool_events metadata, and (fallback) a generated-image URL in the
+    turn content (robust to whether metadata is threaded into the messages).
+    """
+    checked = 0
+    for msg in reversed(messages):
+        if msg.get("role") != "assistant":
+            continue
+        checked += 1
+        if checked > lookback:
+            break
+        events = (msg.get("metadata") or {}).get("tool_events") or []
+        if isinstance(events, list) and any(
+            isinstance(e, dict) and e.get("tool") in _IMAGE_TOOL_NAMES for e in events
+        ):
+            return True
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+        if "/api/generated-image/" in str(content or ""):
+            return True
+    return False
+
+
 def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, object]:
     """Classify only whether this turn deserves domain tool retrieval.
 
@@ -823,6 +858,16 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("contacts")
     if has(r"\b(images?|pictures?|photos?|drawings?|draw|sketch|illustrations?|illustrate|render|artwork|portrait|wallpaper|logo|icon|avatar)\b",
            r"\b(generate|make|create|draw|design)\b.*\bimage", r"\b(upscale|inpaint|remove background|rembg)\b"):
+        domains.add("images")
+
+    # A vague follow-up right after a real image turn ("do another", "try again to
+    # match your vision") refers to the image only anaphorically — no keyword — so
+    # it would be flagged low_signal and stripped of generate_image, leaving the
+    # model to confabulate a fake generation. If a recent assistant turn actually
+    # used an image tool, re-arm the images domain. Additive: retrieval_query and
+    # any other matched domains are untouched, so genuine new requests still
+    # classify normally (e.g. "now email it" keeps email AND gains images).
+    if "images" not in domains and _assistant_used_image_tool(messages):
         domains.add("images")
 
     low_signal = not continuation and not domains
