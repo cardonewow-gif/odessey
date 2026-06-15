@@ -104,12 +104,33 @@ def _email_tag_owner_clause(account_id: str | None, owner: str = "") -> tuple[st
 
 
 def _record_email_received_events(owner: str, account_id: str | None, folder: str, emails: list[dict]):
-    """Baseline inbox messages, then fire `email_received` for new arrivals."""
-    if not owner or (folder or "INBOX").upper() != "INBOX" or not emails:
+    """Baseline a folder's messages, then fire `email_received` for new arrivals.
+
+    Each fired event carries the concrete account id + folder name in its
+    `meta` so an `email_received` task that pinned a specific account/folder
+    only triggers on mail that actually landed there (see
+    src.event_bus._event_matches_task). Previously this only ran for INBOX;
+    it now baselines whatever folder was listed so per-folder triggers work,
+    while tasks that don't pin a folder still default to INBOX-only.
+    """
+    folder = (folder or "INBOX").strip() or "INBOX"
+    if not owner or not emails:
         return
     try:
         from src.event_bus import fire_event
         account_key = (account_id or "default").strip() or "default"
+        # Resolve the concrete EmailAccount.id for the event payload. When the
+        # folder was listed without an explicit account_id, the backend used
+        # this user's default account — tasks pin a concrete id, so resolve it
+        # here rather than emitting an empty/ambiguous account. The dedup
+        # account_key above is deliberately left as-is so existing baselines
+        # aren't invalidated.
+        event_account_id = (account_id or "").strip()
+        if not event_account_id:
+            try:
+                event_account_id = (_get_email_config(None, owner=owner).get("account_id") or "").strip()
+            except Exception:
+                event_account_id = ""
         now = datetime.utcnow().isoformat() + "Z"
         keys = []
         for e in emails:
@@ -151,9 +172,13 @@ def _record_email_received_events(owner: str, account_id: str | None, folder: st
             conn.close()
 
         if count and new_keys:
+            meta = {"account_id": event_account_id, "folder": folder}
             for _ in new_keys[:50]:
-                fire_event("email_received", owner)
-            logger.info("Fired email_received for %d new message(s)", min(len(new_keys), 50))
+                fire_event("email_received", owner, meta=meta)
+            logger.info(
+                "Fired email_received for %d new message(s) in %s/%s",
+                min(len(new_keys), 50), account_key, folder,
+            )
     except Exception:
         logger.debug("email_received event detection skipped", exc_info=True)
 

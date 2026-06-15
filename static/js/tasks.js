@@ -218,6 +218,69 @@ async function _fetchEvents() {
   return _triggerEvents;
 }
 
+// Render (or hide) the account + folder pickers for the selected event. Only
+// events flagged `supports_email_filter` (today: email_received) show them; an
+// empty account means "any account" and an empty folder means INBOX, matching
+// the backend defaults in src/event_bus._event_matches_task.
+function _renderEmailEventFilter(ev, existing) {
+  const wrap = document.getElementById('task-form-email-filter');
+  if (!wrap) return;
+  if (!ev || !ev.supports_email_filter) {
+    wrap.style.display = 'none';
+    wrap.innerHTML = '';
+    return;
+  }
+  wrap.style.display = '';
+  const accounts = ev.accounts || [];
+  const selAcct = existing?.trigger_event_account || '';
+  const selFolder = existing?.trigger_event_folder || '';
+  const acctOpts = ['<option value="">Any account</option>']
+    .concat(accounts.map(a =>
+      `<option value="${_esc(a.id)}"${a.id === selAcct ? ' selected' : ''}>` +
+      `${_esc(a.name)}${a.is_default ? ' (default)' : ''}</option>`))
+    .join('');
+  wrap.innerHTML = `
+    <label class="task-form-label">Email account</label>
+    <select id="task-form-event-account" class="task-form-input">${acctOpts}</select>
+    <label class="task-form-label">Folder</label>
+    <select id="task-form-event-folder" class="task-form-input">
+      <option value="">INBOX</option>
+    </select>
+    <div style="font-size:10px;opacity:0.4;margin-top:2px;">Only mail arriving in this account + folder advances the trigger. Defaults watch any account's INBOX.</div>
+  `;
+  _populateEventFolders(selAcct, selFolder);
+  const acctSel = document.getElementById('task-form-event-account');
+  // Folders are account-specific — refetch when the account changes, resetting
+  // the folder selection to the INBOX default.
+  acctSel?.addEventListener('change', () => _populateEventFolders(acctSel.value, ''));
+}
+
+// Fill the folder <select> with the chosen account's IMAP folders. INBOX is
+// always offered first and maps to the empty value (the backend default). A
+// saved folder that the server no longer lists is preserved as an option so
+// editing a task never silently drops its scope.
+async function _populateEventFolders(accountId, selectedFolder) {
+  const sel = document.getElementById('task-form-event-folder');
+  if (!sel) return;
+  let folders = [];
+  try {
+    const qs = accountId ? `?account_id=${encodeURIComponent(accountId)}` : '';
+    const res = await fetch(`${API_BASE}/api/email/folders${qs}`, { credentials: 'same-origin' });
+    const data = await res.json();
+    folders = data.folders || [];
+  } catch (e) {
+    folders = [];
+  }
+  const nonInbox = folders.filter(f => (f || '').toUpperCase() !== 'INBOX');
+  const opts = [`<option value=""${!selectedFolder ? ' selected' : ''}>INBOX</option>`]
+    .concat(nonInbox.map(f =>
+      `<option value="${_esc(f)}"${f === selectedFolder ? ' selected' : ''}>${_esc(f)}</option>`));
+  if (selectedFolder && (selectedFolder.toUpperCase() !== 'INBOX') && !nonInbox.includes(selectedFolder)) {
+    opts.push(`<option value="${_esc(selectedFolder)}" selected>${_esc(selectedFolder)}</option>`);
+  }
+  sel.innerHTML = opts.join('');
+}
+
 // ---- Helpers ----
 
 function _scheduleLabel(task) {
@@ -225,7 +288,13 @@ function _scheduleLabel(task) {
   if (tt === 'event') {
     const evtName = (task.trigger_event || 'event').replace(/_/g, ' ');
     const n = task.trigger_count || 1;
-    return `Every ${n} ${evtName}${n > 1 ? 's' : ''}`;
+    let label = `Every ${n} ${evtName}${n > 1 ? 's' : ''}`;
+    // Show the mailbox scope for email_received so a folder-pinned task is
+    // distinguishable at a glance.
+    if (task.trigger_event === 'email_received' && (task.trigger_event_folder || task.trigger_event_account)) {
+      label += ` · ${task.trigger_event_folder || 'INBOX'}`;
+    }
+    return label;
   }
   if (tt === 'webhook') return 'Webhook';
   const t = task.scheduled_time || '00:00';
@@ -1245,6 +1314,7 @@ function _showForm(existing, initTaskType, initTriggerType) {
         <select id="task-form-event" class="task-form-input">
           <option value="">Loading…</option>
         </select>
+        <div id="task-form-email-filter" style="display:none;"></div>
         <label class="task-form-label">Every N occurrences</label>
         <input type="number" id="task-form-trigger-count" class="task-form-input" min="1" max="1000" value="${existing?.trigger_count || 5}" />
       `;
@@ -1259,6 +1329,12 @@ function _showForm(existing, initTaskType, initTriggerType) {
           if (existing?.trigger_event === ev.name) opt.selected = true;
           sel.appendChild(opt);
         }
+        // email_received supports optional per-account / per-folder scoping;
+        // show those inputs only while that event is selected.
+        const _syncEmailFilter = () =>
+          _renderEmailEventFilter(events.find(e => e.name === sel.value), existing);
+        sel.addEventListener('change', _syncEmailFilter);
+        _syncEmailFilter();
       });
     } else if (triggerType === 'webhook') {
       if (existing?.webhook_token) {
@@ -1490,6 +1566,13 @@ function _showForm(existing, initTaskType, initTriggerType) {
       }
       payload.trigger_event = evSel.value;
       payload.trigger_count = parseInt(countInput?.value || '5', 10);
+      // Per-account / per-folder scope for email_received. These inputs only
+      // exist while that event is selected; send "" otherwise-untouched so the
+      // user can clear a previously-set scope back to any-account/INBOX.
+      const acctSel = document.getElementById('task-form-event-account');
+      const folderSel = document.getElementById('task-form-event-folder');
+      if (acctSel) payload.trigger_event_account = acctSel.value;
+      if (folderSel) payload.trigger_event_folder = folderSel.value;
     }
     // webhook: no extra fields needed, token is auto-generated server-side
 

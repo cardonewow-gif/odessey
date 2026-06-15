@@ -146,6 +146,8 @@ class TaskCreate(BaseModel):
     trigger_type: str = "schedule"                # "schedule" | "event" | "webhook"
     trigger_event: Optional[str] = None           # e.g. "session_created"
     trigger_count: Optional[int] = None           # fire every N events
+    trigger_event_account: Optional[str] = None   # email_received: EmailAccount.id ("" / None = any account)
+    trigger_event_folder: Optional[str] = None    # email_received: IMAP folder ("" / None = INBOX)
     output_target: str = "session"
     model: Optional[str] = None
     endpoint_url: Optional[str] = None
@@ -166,6 +168,8 @@ class TaskUpdate(BaseModel):
     trigger_type: Optional[str] = None
     trigger_event: Optional[str] = None
     trigger_count: Optional[int] = None
+    trigger_event_account: Optional[str] = None
+    trigger_event_folder: Optional[str] = None
     output_target: Optional[str] = None
     model: Optional[str] = None
     endpoint_url: Optional[str] = None
@@ -197,6 +201,8 @@ def _task_to_dict(t: ScheduledTask, include_last_run_result: bool = False) -> di
         "trigger_event": t.trigger_event,
         "trigger_count": t.trigger_count,
         "trigger_counter": t.trigger_counter or 0,
+        "trigger_event_account": getattr(t, "trigger_event_account", None),
+        "trigger_event_folder": getattr(t, "trigger_event_folder", None),
         "next_run": t.next_run.isoformat() + "Z" if t.next_run else None,
         "last_run": t.last_run.isoformat() + "Z" if t.last_run else None,
         "status": t.status,
@@ -544,6 +550,10 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 trigger_event=req.trigger_event,
                 trigger_count=req.trigger_count,
                 trigger_counter=0,
+                # Optional email_received scoping; empty string ⇒ NULL so the
+                # matcher reads it as "any account" / "INBOX" respectively.
+                trigger_event_account=(req.trigger_event_account or "").strip() or None,
+                trigger_event_folder=(req.trigger_event_folder or "").strip() or None,
                 next_run=next_run,
                 status="active" if (req.trigger_type in ("event", "webhook") or next_run) else "completed",
                 output_target=req.output_target,
@@ -701,6 +711,12 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 task.trigger_event = req.trigger_event
             if req.trigger_count is not None:
                 task.trigger_count = req.trigger_count
+            # Empty string explicitly clears the scope (any account / INBOX);
+            # an omitted field (None) leaves the stored value untouched.
+            if req.trigger_event_account is not None:
+                task.trigger_event_account = req.trigger_event_account.strip() or None
+            if req.trigger_event_folder is not None:
+                task.trigger_event_folder = req.trigger_event_folder.strip() or None
             if req.then_task_id is not None:
                 task.then_task_id = _validate_then_task_id(db, req.then_task_id, user, current_task_id=task.id)
             if req.notifications_enabled is not None:
@@ -1014,15 +1030,45 @@ def setup_task_routes(task_scheduler) -> APIRouter:
 
     @router.get("/meta/events")
     async def list_events(request: Request):
-        """List available event triggers."""
-        _owner(request)
+        """List available event triggers.
+
+        The `email_received` entry is annotated with `supports_email_filter`
+        and the caller's email accounts so the task form can offer per-account
+        / per-folder scoping. Accounts are scoped to the current user the same
+        way GET /api/email/accounts is, so no cross-tenant mailbox leaks.
+        """
+        user = _owner(request)
+        email_accounts = []
+        try:
+            from core.database import EmailAccount
+            from sqlalchemy import and_, or_
+            db = SessionLocal()
+            try:
+                q = db.query(EmailAccount).filter(EmailAccount.enabled == True)  # noqa: E712
+                if user:
+                    unowned = or_(EmailAccount.owner == None, EmailAccount.owner == "")  # noqa: E711
+                    same_mailbox = or_(EmailAccount.imap_user == user, EmailAccount.from_address == user)
+                    q = q.filter(or_(EmailAccount.owner == user, and_(unowned, same_mailbox)))
+                for r in q.order_by(EmailAccount.is_default.desc(), EmailAccount.created_at.asc()).all():
+                    email_accounts.append({
+                        "id": r.id,
+                        "name": r.name,
+                        "is_default": bool(r.is_default),
+                    })
+            finally:
+                db.close()
+        except Exception as e:
+            logger.debug(f"list_events: email account lookup failed: {e}")
         return {"events": [
             {"name": "session_created", "description": "Fires when a new chat session is created"},
             {"name": "message_sent", "description": "Fires when a user sends a message"},
             {"name": "document_created", "description": "Fires when a document is created"},
             {"name": "memory_added", "description": "Fires when a memory is added"},
             {"name": "research_completed", "description": "Fires when a research report completes"},
-            {"name": "email_received", "description": "Fires when new inbox mail is observed"},
+            {"name": "email_received",
+             "description": "Fires when new mail is observed",
+             "supports_email_filter": True,
+             "accounts": email_accounts},
             {"name": "skill_added", "description": "Fires when a new skill is created"},
         ]}
 

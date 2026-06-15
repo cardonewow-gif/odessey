@@ -558,6 +558,12 @@ class ScheduledTask(TimestampMixin, Base):
     trigger_event  = Column(String, nullable=True)            # e.g. "session_created", "message_sent"
     trigger_count  = Column(Integer, nullable=True)           # fire every N events
     trigger_counter = Column(Integer, default=0)              # current count toward trigger_count
+    # For "email_received" event tasks only: optionally scope the trigger to a
+    # single mailbox/folder. trigger_event_account holds an EmailAccount.id
+    # (null = any account); trigger_event_folder holds an IMAP folder name
+    # (null = INBOX, which preserves legacy inbox-only behavior).
+    trigger_event_account = Column(String, nullable=True)
+    trigger_event_folder  = Column(String, nullable=True)
     next_run       = Column(DateTime, nullable=True, index=True)
     last_run       = Column(DateTime, nullable=True)
     status         = Column(String, default="active")         # "active", "paused", "completed"
@@ -1427,6 +1433,27 @@ def _migrate_add_task_automation_columns():
     except Exception as e:
         logging.getLogger(__name__).warning(f"task automation migration: {e}")
 
+def _migrate_add_task_event_target_columns():
+    """Add per-event email account/folder filter columns to scheduled_tasks.
+
+    Used by "email_received" event tasks to scope the trigger to one mailbox
+    and/or folder. Both nullable; null preserves legacy "any account / INBOX"
+    behavior."""
+    new_cols = {
+        "trigger_event_account": "VARCHAR",
+        "trigger_event_folder": "VARCHAR",
+    }
+    try:
+        with engine.connect() as conn:
+            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(scheduled_tasks)"))]
+            for col_name, col_def in new_cols.items():
+                if col_name not in cols:
+                    conn.execute(text(f"ALTER TABLE scheduled_tasks ADD COLUMN {col_name} {col_def}"))
+            conn.commit()
+            logging.getLogger(__name__).info("Task event-target columns migration complete")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"task event-target migration: {e}")
+
 def _migrate_add_oauth_config():
     """Add oauth_config column to mcp_servers table if missing."""
     try:
@@ -1757,6 +1784,7 @@ def init_db():
     _migrate_add_disabled_tools()
     _migrate_add_mcp_oauth_tokens_column()
     _migrate_add_task_v2_columns()
+    _migrate_add_task_event_target_columns()
     _migrate_add_notifications_enabled()
     _migrate_drop_ping_notes_tasks()
     _migrate_add_crew_member_id()
