@@ -617,6 +617,24 @@ _ADMIN_SCHEMA_NAMES = frozenset([
     "ask_teacher", "list_models", "search_chats",
 ])
 _TOOL_SELECTION_TIMEOUT_SECONDS = 1.5
+_WEB_DOMAIN_RE = re.compile(
+    r"https?://|www\.|"
+    r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"(?:com|org|net|io|ai|pl|gov|edu|co|uk|de|fr|es|it|nl|se|no|fi|dk|cz|eu|info|biz|dev|app|xyz|me)"
+    r"(?:/[^\s]*)?\b|"
+    r"\b(?:search|google|look up|weather|forecast|website|url)\b|"
+    r"\b(?:wyszukaj|sprawd[źz]|znajd[źz]|poszukaj|internet|internecie|"
+    r"pogod[aeęy]|temperatur[aeęy]|aktualn[ae]|najnowsz[ae]|cen[ay]|kurs)\b",
+    re.I,
+)
+
+
+def _apply_agent_loop_tool_hints(relevant_tools: Optional[Set[str]], query: str) -> Optional[Set[str]]:
+    if query and _WEB_DOMAIN_RE.search(query):
+        tools = set(relevant_tools or ())
+        tools.update({"web_search", "web_fetch"})
+        return tools
+    return relevant_tools
 
 
 def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
@@ -1857,29 +1875,7 @@ async def stream_agent_loop(
                 _relevant_tools.update(tools)
         logger.info(f"[tool-rag] Keyword fallback selected: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
 
-    # If deterministic domain detection fired, seed the corresponding domain
-    # tools into the selected tool set. This is not direct prompt-pack
-    # injection: `_assemble_prompt()` still derives domain rules from the final
-    # tool names. It prevents obvious requests like "last 5 emails" from
-    # collapsing to only ask_user/manage_memory when vector retrieval misses or
-    # times out.
-    if not guide_only and _relevant_tools is not None:
-        for _domain in (_intent.get("domains") or set()):
-            _relevant_tools.update(_DOMAIN_TOOL_MAP.get(str(_domain), set()))
-        if "cookbook" in (_intent.get("domains") or set()):
-            _relevant_tools.update({
-                "list_served_models",
-                "list_downloads",
-                "list_cached_models",
-                "list_cookbook_servers",
-                "list_serve_presets",
-            })
-        if "email" in (_intent.get("domains") or set()):
-            _relevant_tools.add("ui_control")
-        if "web" in (_intent.get("domains") or set()):
-            _relevant_tools.update({"web_search", "web_fetch"})
-        if "ui" in (_intent.get("domains") or set()):
-            _relevant_tools.add("ui_control")
+
 
     # If a document is open the model needs the editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran

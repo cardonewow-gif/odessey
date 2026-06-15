@@ -338,6 +338,22 @@ class ToolIndex:
         re.I,
     )
 
+    # Web/current-info intent — English via ALWAYS_AVAILABLE; Polish phrases
+    # (#4055) force-include web tools when RAG misses non-English queries.
+    _WEB_RE = re.compile(
+        r"https?://|www\.|"
+        r"\b(?:search|google|look up|weather|forecast|website|url)\b|"
+        r"\b(?:wyszukaj|sprawd[źz]|znajd[źz]|poszukaj|pogod[aeęy]|temperatur[aeęy]|"
+        r"internet(?:ie|u)?|internecie|online|ceny|cen[ay]|kurs|dzisiaj|aktualna|najnowsza)\b|"
+        r"wyszukaj\s+w\s+internecie|"
+        r"sprawd[źz]\s+(?:w\s+internecie|online)|"
+        r"znajd[źz]\s+informacje\s+o|"
+        r"jaka\s+jest\s+(?:aktualna\s+)?pogod|"
+        r"sprawd[źz]\s+cen|"
+        r"aktualn(?:a|e)\s+informacj",
+        re.I,
+    )
+
     # Keyword hints: if the query mentions these words, force-include the tools.
     _KEYWORD_HINTS = {
         # NOTE: "tell" was removed from this set. It fired on any "tell me ..."
