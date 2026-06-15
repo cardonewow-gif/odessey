@@ -302,6 +302,69 @@ Local GPU *serving* of vLLM/SGLang needs Linux/WSL2; for a local model on Window
 Open `http://localhost:7000`, log in with the generated admin password,
 and configure everything else inside **Settings**.
 
+### Making a clickable app (Windows)
+
+The launcher auto-opens your browser once the server is ready. To make
+Odysseus feel like a native app you can find in the Start Menu:
+
+**Option A – Start Menu shortcut via batch file (recommended)**
+
+`odysseus.bat` is a small wrapper around `launch-windows.ps1`. It shows the
+console output, keeps the window open on error, and auto-opens the browser
+when the server is ready. Double-click it from the project folder, or create
+a Start Menu shortcut:
+
+Run this **once** in PowerShell (replace the paths with your actual checkout
+directory):
+
+```powershell
+$ws = New-Object -ComObject WScript.Shell
+$s = $ws.CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Odysseus.lnk")
+$s.TargetPath = "C:\Full\Path\To\odysseus.bat"
+$s.WorkingDirectory = "C:\Full\Path\To\odysseus"
+$s.Save()
+```
+
+Now press Win, type `Odysseus`, and press Enter to launch.
+
+If the window closes immediately with red text, it means something went wrong
+(e.g., port 7000 already in use, Python not found, or a missing dependency).
+The window will now pause before closing so you can read the error. Common
+fixes:
+
+- **Port in use:** stop whatever is on port 7000, or edit `.env` with
+  `APP_PORT=7001` and re-launch.
+- **Python not found:** install Python 3.11+ from
+  https://www.python.org/downloads/ and make sure the Python launcher (`py`)
+  is on your PATH.
+- **Dependency issue:** run `launch-windows.ps1` from a PowerShell window
+  directly to see the full error without the window closing.
+
+**Option B – Desktop shortcut**
+
+Right-click `launch-windows.ps1` → **Create shortcut**, then move or pin it
+wherever you like. Set the shortcut's **Target** to:
+
+```
+powershell -ExecutionPolicy Bypass -File "C:\Full\Path\To\launch-windows.ps1"
+```
+
+**Option C – Single-file .exe via PyInstaller**
+
+Bundle the whole app into one `.exe` (larger, slower to start, but truly
+portable):
+
+```powershell
+pip install pyinstaller
+pyinstaller --onefile --name Odysseus --add-data "static;static" --hidden-import uvicorn --hidden-import fastapi app.py
+```
+
+The output lives in `dist\Odysseus.exe`. Run it from anywhere — a console
+window will open, the server starts, and your browser launches automatically.
+
+> **Note:** Updating the code requires re-running PyInstaller. For day-to-day
+> use, Option A or B is recommended.
+
 ## Troubleshooting & Advanced Setup
 
 ### `chromadb-client` conflicts with embedded ChromaDB
