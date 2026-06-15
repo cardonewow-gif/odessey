@@ -15,6 +15,67 @@ _CODENAV_SKIP_DIRS = frozenset({
 })
 _CODENAV_MAX_HITS = 200
 _CODENAV_MAX_LINE = 400
+_GLOB_TIMEOUT_SECS = 15   # hard timeout for glob -> return what we have
+_GLOB_MAX_DIRS = 5000     # bail after visiting this many directories
+
+def _walk_matches(base, pattern: str, max_depth: int, _fnmatch, skip_dirs, max_hits: int, matched: list):
+    """Bounded-depth file matcher. Walk only to *max_depth* levels below *base*,
+    matching each filename against the last segment of *pattern*. For intermediate
+    directories with `*` wildcards, match against the directory name.
+
+    This avoids unbounded rglob() on massive directory trees where rglob could
+    traverse hundreds of thousands of files just to find a few at depth 2.
+    """
+    import os as _os
+    parts = pattern.replace("\\", "/").replace("//", "/").strip("/").split("/")
+    if not parts:
+        return
+
+    def _step(current_dir, depth):
+        if depth > max_depth or len(matched) >= max_hits * 5:
+            return
+        name_part = parts[depth] if depth < len(parts) else None
+        if name_part is None:
+            return
+        is_last = depth == len(parts) - 1
+        try:
+            with os.scandir(current_dir) as entries:
+                for entry in entries:
+                    if len(matched) >= max_hits * 5:
+                        return
+                    if entry.is_dir() and entry.name in skip_dirs:
+                        continue
+                    if is_last:
+                        if not entry.is_file():
+                            continue
+                        if _fnmatch(entry.name, name_part):
+                            try:
+                                mtime = entry.stat().st_mtime
+                            except OSError:
+                                mtime = 0
+                            matched.append((mtime, entry.path))
+                    else:
+                        if not entry.is_dir():
+                            continue
+                        if "*" in name_part:
+                            if not _fnmatch(entry.name, name_part):
+                                continue
+                        elif entry.name != name_part:
+                            continue
+                        _step(entry.path, depth + 1)
+        except (OSError, PermissionError):
+            pass
+
+    _step(str(base), 0)
+
+
+class _noop_ctx:
+    """No-op context manager for when we don't need scandir."""
+    def __enter__(self):
+        pass
+    def __exit__(self, *args):
+        pass
+
 
 def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
     if old == new:
@@ -263,24 +324,60 @@ class GlobTool:
             base = Path(root)
             if not base.is_dir():
                 return None, f"glob: {root}: not a directory"
-            matched = []
+            has_recursive = "**" in pattern
+            depth = None
+            if not has_recursive:
+                rel_pattern = pattern.replace("\\", "/")
+                pattern_parts = rel_pattern.rsplit("/", 1)
+                dir_parts = pattern_parts[0].split("/") if len(pattern_parts) > 1 else []
+                wildcard_dirs = sum(1 for p in dir_parts if "*" in p and "**" not in p)
+                fixed_dirs = sum(1 for p in dir_parts if "*" not in p)
+                depth = fixed_dirs + wildcard_dirs + 1
             try:
-                for p in base.rglob(pattern):
-                    if set(p.relative_to(base).parts) & _CODENAV_SKIP_DIRS:
-                        continue
-                    try:
-                        mtime = p.stat().st_mtime
-                    except OSError:
-                        mtime = 0
-                    matched.append((mtime, str(p)))
-                    if len(matched) > _CODENAV_MAX_HITS * 5:
-                        break
+                if has_recursive or depth is None:
+                    from fnmatch import fnmatch as _fnmatch2
+                    file_pattern = pattern.split("/")[-1]
+                    dirs_visited = 0
+                    for dirpath, dirnames, filenames in os.walk(str(base)):
+                        dirs_visited += 1
+                        if dirs_visited > _GLOB_MAX_DIRS:
+                            break
+                        dirnames[:] = [d for d in dirnames if d not in _CODENAV_SKIP_DIRS]
+                        for fn in filenames:
+                            if _fnmatch2(fn, file_pattern):
+                                try:
+                                    mtime = os.path.getmtime(os.path.join(dirpath, fn))
+                                except OSError:
+                                    mtime = 0
+                                matched.append((mtime, os.path.join(dirpath, fn)))
+                                if len(matched) > _CODENAV_MAX_HITS * 5:
+                                    break
+                        if len(matched) > _CODENAV_MAX_HITS * 5:
+                            break
+                else:
+                    from fnmatch import fnmatch as _fnmatch
+                    _walk_matches(base, pattern, depth, _fnmatch, _CODENAV_SKIP_DIRS, _CODENAV_MAX_HITS, matched)
             except (OSError, ValueError) as _e:
                 return None, f"glob: {_e}"
             matched.sort(key=lambda t: t[0], reverse=True)
             return [pth for _, pth in matched[:_CODENAV_MAX_HITS]], None
 
-        paths, err = await asyncio.to_thread(_glob)
+        # Shared mutable list so timeout handler can access partial results.
+        matched = []
+        try:
+            paths, err = await asyncio.wait_for(
+                asyncio.to_thread(_glob),
+                timeout=_GLOB_TIMEOUT_SECS,
+            )
+        except asyncio.TimeoutError:
+            partial = [pth for _, pth in sorted(matched, key=lambda t: t[0], reverse=True)[:100]]
+            if partial:
+                out = "\n".join(partial)
+                return {
+                    "output": out + f"\n... [glob timed out after {_GLOB_TIMEOUT_SECS}s; showing partial results from {len(partial)} files]",
+                    "exit_code": 0,
+                }
+            return {"error": f"glob: timed out after {_GLOB_TIMEOUT_SECS}s — tree too large", "exit_code": 1}
         if err:
             return {"error": err, "exit_code": 1}
         if not paths:

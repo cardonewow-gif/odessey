@@ -8,6 +8,7 @@ The LLM decides when to use tools by writing fenced code blocks.
 
 import asyncio
 import collections
+import os
 import json
 import re
 import time
@@ -301,8 +302,8 @@ TOOL_SECTIONS = {
 ```
 Run any shell command. Output is returned to you. Use for: installing packages, checking files, git, system info, process management, etc.
 Do NOT use bash/curl for web lookup/search/latest/current requests when `web_search` or `web_fetch` is available.
-NEVER use bash to create or change files — no `>`/`>>` redirects, no heredocs (`cat > f << 'EOF'`), no `tee`, `sed -i`, `awk -i`, no `python -c` that writes. To CREATE or fully rewrite a file use `write_file`; to change part of an existing file use `edit_file`. Those show a diff and are the ONLY allowed way to write files. (bash is for read-only inspection: `ls`, `cat` to READ, `grep`, `git status`/`git diff`, builds, installs.)
-For LONG-running commands (package installs, pip/npm, ffmpeg, model downloads, training, builds — anything that may take more than ~20s), make the FIRST line `#!bg` to run it in the BACKGROUND. You get a job id back immediately and are automatically re-invoked with the full output when it finishes — so you never block the chat waiting. Example:
+File writes: PREFER write_file (creates/rewrites) or edit_file (targeted edits) — they show a diff. If write_file/edit_file report a path restriction error ("outside the allowed roots"), you MAY fall back to bash with cat > path << '''EOF''' ... EOF or tee to write the file. Do NOT use sed -i or awk -i for in-place edits. bash is also for read-only tasks: ls, cat to READ, grep, git status/git diff, builds, installs.
+For commands that could take more than ~30s — builds, compilers, batch processing, multi-directory loops, find+xargs, wc, grep across many files — make the FIRST line `#!bg` to run in the BACKGROUND. You get a job id back immediately and are automatically re-invoked when it finishes. Example:
 ```bash
 #!bg
 pip install openai-whisper
@@ -415,7 +416,7 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
     "manage_mcp": "- ```manage_mcp``` — Manage MCP (Model Context Protocol) tool servers — external tools that extend your capabilities. Args (JSON): {\"action\": \"list|add|delete|reconnect|list_tools\", ...}",
     "manage_webhooks": "- ```manage_webhooks``` — Configure outgoing webhooks (HTTP notifications on events like chat completion). Args (JSON): {\"action\": \"list|add|delete|enable|disable\", ...}",
     "manage_tokens": "- ```manage_tokens``` — Generate or revoke API access tokens for external integrations. Args (JSON): {\"action\": \"list|create|delete\", ...}",
-    "manage_documents": "- ```manage_documents``` — List, read/open, delete, or tidy documents in the editor panel. Args (JSON): {\"action\": \"list|read|delete|tidy\", ...}. `list` returns rows like `[Title](#document-<id>) — lang, size, updated 5m ago` sorted MOST-RECENT FIRST; the user clicks the anchor to open. `read` (aliases: view/open/get) takes `document_id` and returns the content. When the user asks \"open/show/read my notes\" or \"what documents do I have\", use this — do NOT shell out, do NOT curl.",
+    "manage_documents": "- ```manage_documents``` — List, read/open, delete, or tidy documents in the editor panel. Args (JSON): {\"action\": \"list|read|delete|tidy\", ...}. `list` returns rows like `[Title](#document-<id>) — lang, size, updated 5m ago` sorted MOST-RECENT FIRST; the user clicks the anchor to open. `read` (aliases: view/open/get) takes `document_id` and returns the content. When the user asks \"open/show/read my notes\" or \"what documents do I have\", use this — do NOT shell out, do NOT curl. NOTE: this tool does NOT edit, save, update, or add content. To create a document use create_document; to edit one use edit_document; to fully rewrite use update_document.",
     "manage_research": "- ```manage_research``` — List, read/open, or delete saved DEEP RESEARCH results from the Library. Args (JSON): {\"action\": \"list|read|delete\", \"id\": \"<id>\", \"search\": \"...\"}. `list` returns rows like `[query](#research-<id>) — N sources` MOST-RECENT FIRST; the user clicks to open. `read` (aliases: open/view/get) takes `id` and returns the report text + sources. Use when the user says \"open/read/find/delete my research\" or \"that report\". This IS how you read a finished report: when the user refers to a just-completed deep-research job (\"check it out\", \"read that report\", \"summarize the research\") WITHOUT giving an id, call `manage_research` with `action:list` to get the most-recent id, then `action:read` with that id, and answer from the returned text. Do NOT `web_fetch`/`app_api` the `/api/research/report/{id}` URL — that endpoint renders HTML for the browser, not clean text — and do NOT start a fresh `web_search`/`trigger_research` just to read an existing report. To START new research, use trigger_research instead.",
     "manage_settings": "- ```manage_settings``` — View/change the REAL app settings (same ones the Settings panel writes) AND turn tools on/off. Change a setting: `{\"action\":\"set\",\"key\":\"...\",\"value\":\"...\"}` — keys accept friendly aliases, e.g. voice→tts_voice, \"search engine\"→search_provider, \"default model\"→default_model, \"teacher model\"→teacher_model, \"task/background model\"→task_model, \"image quality\"→image_quality, \"reminder channel\"→reminder_channel (browser|email|ntfy), \"agent timeout\"/\"max tool calls\"/\"token budget\". Read: `{\"action\":\"get\",\"key\":\"...\"}`; see all: `{\"action\":\"list\"}`; reset one: `{\"action\":\"reset\",\"key\":\"...\"}`. Use this when the user asks to change ANY preference instead of making them open Settings. Secrets/API keys are read-only (tell them to set those in the panel). Tool toggles: `{\"action\":\"disable_tool|enable_tool\",\"tool\":\"shell\"}` (aliases: shell/search/browser/documents/memory/skills/images/tasks/notes/calendar/email), list disabled: `{\"action\":\"list_tools\"}`.",
     "manage_notes": """\
@@ -509,6 +510,16 @@ Body for POST/PUT/PATCH goes in `body` (object). Query params in `query` (object
 **When to prefer named tools over app_api:** if a named wrapper exists (list_email_accounts, list_emails, read_email, manage_calendar, manage_notes, list_served_models, etc.) USE IT — it has nicer output formatting and clearer schema. Reach for `app_api` only when there's no wrapper for what you need.
 
 Blocked paths/routes (refused for safety): /api/auth/, /api/users/, /api/tokens/, /api/admin/, /api/shell/, /api/backup/restore, /api/email/accounts, POST /api/cookbook/packages/install, POST /api/cookbook/rebuild-engine, POST /api/cookbook/kill-pid.""",
+    "delegate_task": """\
+```delegate_task
+{"description": "Research database options", "prompt": "Compare PostgreSQL, MySQL, and SQLite for a small web app. Consider performance, ease of setup, and community support.", "model": "auto"}
+```
+Delegate a self-contained thinking task to a fresh LLM sub-agent. The sub-agent runs WITHOUT tools — it's a pure reasoning/analysis/writing engine. Use for: code review, architectural analysis, writing content, comparing options, or any task you want handled in isolation. Accepts JSON with `description` (short label), `prompt` (full instructions), and optional `model`. Returns the sub-agent's text result.""",
+    "load_skill": """\
+```load_skill
+<skill name or empty to list>
+```
+Load a skill's full SKILL.md procedure into your context. ALWAYS call this BEFORE starting domain work — a published or teacher-authored draft skill may already prescribe the correct steps, tools, and pitfalls. Use with a name (e.g. `build-macos-apps`) to load the full document. Use with no name to list all available skills.""",
 }
 
 def get_builtin_overrides() -> dict:
@@ -859,6 +870,7 @@ def _build_system_prompt(
     compact: bool = False,
     owner: Optional[str] = None,
     suppress_local_context: bool = False,
+    workspace: Optional[str] = None,
 ) -> List[Dict]:
     """Build agent system prompt, inject MCP/document context, merge consecutive system msgs."""
     global _cached_base_prompt, _cached_base_prompt_key
@@ -926,6 +938,28 @@ def _build_system_prompt(
         _datetime_message = current_datetime_context_message()
     except Exception:
         pass
+
+    # Workspace context — tells the agent where the active project lives.
+    # When ODYSSEUS_WORKSPACE is set, the agent gets a clear project-root
+    # reference so it never gets lost defaulting back to the Odysseus data dir.
+    _workspace_message = None
+    _ws_path = workspace or os.environ.get("ODYSSEUS_WORKSPACE", "").strip()
+    if _ws_path and os.path.isdir(_ws_path):
+        _workspace_message = {
+            "role": "user",
+            "content": (
+                f"## Workspace\n"
+                f"Your current project workspace is: {_ws_path}\n"
+                f"This is the root directory for all file operations. "
+                f"You have full shell access (bash) — you CAN run git clone, "
+                f"git checkout, npm install, bun build, rm, mkdir, and any "
+                f"other shell commands. For destructive commands (rm -rf, "
+                f"git reset --hard, etc.), you'll need to confirm with the "
+                f"user first. When the user mentions files or directories, "
+                f"resolve relative paths against this workspace."
+            ),
+            "_protected": True,
+        }
 
     # Document context is kept as a SEPARATE message (not merged into the tool
     # prompt) so the context trimmer doesn't destroy it when truncating the
@@ -1263,6 +1297,9 @@ def _build_system_prompt(
         last_user_idx += 1
     if _datetime_message:
         merged.insert(last_user_idx, _datetime_message)
+        last_user_idx += 1
+    if _workspace_message:
+        merged.insert(last_user_idx, _workspace_message)
 
     return merged, mcp_schemas
 
@@ -1814,21 +1851,14 @@ async def stream_agent_loop(
     if _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
     if not guide_only and not _relevant_tools and bool(_intent.get("low_signal")):
-        from src.tool_index import ALWAYS_AVAILABLE
-        if workspace:
-            # An active workspace IS the file-work signal: a vague "look at the
-            # project" means explore this folder. Surface only the READ-ONLY file
-            # tools (intersection with the plan-mode read-only allowlist) so the
-            # agent can investigate; write/shell tools stay out until the request
-            # actually calls for them (RAG retrieval adds those on a real ask).
-            _relevant_tools = set(ALWAYS_AVAILABLE)
-            from src.tool_security import PLAN_MODE_READONLY_TOOLS
-            _relevant_tools |= (_DOMAIN_TOOL_MAP["files"] & PLAN_MODE_READONLY_TOOLS)
-            logger.info("[tool-rag] Low-signal but workspace active; including read-only file tools")
+        from src.tool_index import ALWAYS_AVAILABLE, workspace_file_tools
+        _relevant_tools = set(ALWAYS_AVAILABLE) | workspace_file_tools()
+        if _relevant_tools - {*ALWAYS_AVAILABLE}:
+            logger.info("[tool-rag] Low-signal but workspace/dev-mode active; including full file tools")
         else:
-            # Don't short-circuit: fall through to RAG retrieval below.
-            # Non-English queries are flagged low_signal by the English-only
-            # intent classifier, but fastembed retrieval works across languages.
+            # No workspace, no dev mode — nothing extra beyond ALWAYS_AVAILABLE.
+            # Fall through to RAG retrieval below for proper tool selection.
+            _relevant_tools = set()
             logger.info("[tool-rag] Low-signal query; will run RAG retrieval")
     if not guide_only and not _relevant_tools:
         try:
@@ -1859,6 +1889,7 @@ async def stream_agent_loop(
                             _TOOL_SELECTION_TIMEOUT_SECONDS,
                         )
                         _relevant_tools = set(ALWAYS_AVAILABLE)
+                        _relevant_tools.update(workspace_file_tools())
         except Exception as e:
             logger.warning(f"[tool-rag] Retrieval failed, using keyword fallback: {e}")
             _relevant_tools = None
@@ -1866,8 +1897,9 @@ async def stream_agent_loop(
     # Fallback: if RAG unavailable, use keyword-based tool selection
     # instead of sending ALL tools (which overwhelms the model).
     if not guide_only and not _relevant_tools and _retrieval_query:
-        from src.tool_index import ALWAYS_AVAILABLE, ToolIndex
+        from src.tool_index import ALWAYS_AVAILABLE, ToolIndex, workspace_file_tools
         _relevant_tools = set(ALWAYS_AVAILABLE)
+        _relevant_tools.update(workspace_file_tools())
         ql = _retrieval_query.lower()
         for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
             if any(kw in ql for kw in keywords):
@@ -1987,6 +2019,7 @@ async def stream_agent_loop(
         compact=_is_api_model,
         owner=owner,
         suppress_local_context=guide_only,
+        workspace=workspace,
     )
     if plan_mode and not guide_only:
         # Steer the model to investigate-then-propose. Hard tool gating handles
@@ -2705,6 +2738,21 @@ async def stream_agent_loop(
                     )
                 desc, result = await _tool_task
 
+            # Self-improvement: log tool failures for pattern analysis.
+            if result and result.get("error"):
+                try:
+                    from src.self_improve import maybe_log_tool_failure
+                    import asyncio as _sched_asyncio
+                    _sched_asyncio.create_task(
+                        maybe_log_tool_failure(
+                            result,
+                            tool_name=block.tool_type,
+                            session_id=session_id,
+                        )
+                    )
+                except Exception:
+                    pass
+
             # Extract structured web sources from web_search tool output.
             # web_search returns {"output": ..., "exit_code": 0}; check "output"
             # first so the <!-- SOURCES:…--> marker is found and stripped even
@@ -2767,6 +2815,27 @@ async def stream_agent_loop(
                     yield 'data: ' + json.dumps({"delta": _auq_delta}) + '\n\n'
                 yield (
                     f'data: {json.dumps({"type": "ask_user", "data": result["ask_user"]})}\n\n'
+                )
+                _awaiting_user = True
+
+            # needs_approval: the agent tried to run a destructive command.
+            # Emit it so the frontend can show a confirmation prompt, then
+            # end the turn and wait for the user's decision. The error message
+            # includes instructions for the agent to use ask_user.
+            if "needs_approval" in result:
+                _na = result["needs_approval"]
+                _na_cmd = (_na.get("command") or "")[:200]
+                _na_token = str(_na.get("token") or "")
+                _na_msg = (
+                    f"\n\nI need your approval to run a destructive command:\n\n"
+                    f"> `{_na_cmd}`\n\n"
+                    f"To approve, respond with `!approve {_na_token}`. "
+                    f"To deny, respond with `!deny`."
+                )
+                full_response += _na_msg
+                yield 'data: ' + json.dumps({"delta": _na_msg}) + '\n\n'
+                yield (
+                    f'data: {json.dumps({"type": "tool_approval_required", "data": result["needs_approval"]})}\n\n'
                 )
                 _awaiting_user = True
 
