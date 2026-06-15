@@ -91,6 +91,10 @@ DEFAULT_SETTINGS = {
     "research_planning_timeout_seconds": 90,
     "research_query_timeout_seconds": 90,
     "research_extraction_concurrency": 3,
+    # Pull relevant Library documents into Deep Research as a local source.
+    # Off by default; documents are selected by semantic relevance (top-K).
+    "research_use_library": False,
+    "research_library_max_docs": 5,
     # Hard wall-clock cap on a single deep-research run. The previous 600s
     # (10 min) default cut off slow local / edge LLMs mid-synthesis; 1800s
     # (30 min) is comfortable for most local setups while still bounding

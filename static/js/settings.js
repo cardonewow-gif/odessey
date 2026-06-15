@@ -1406,6 +1406,8 @@ async function initResearchSettings() {
   var tokensInput = el('set-researchMaxTokens');
   var extractTimeoutInput = el('set-researchExtractTimeout');
   var extractConcurrencyInput = el('set-researchExtractConcurrency');
+  var useLibraryToggle = el('set-researchUseLibrary');
+  var libraryMaxInput = el('set-researchLibraryMaxDocs');
   var runTimeoutInput = el('set-researchRunTimeout');
   var msg = el('set-researchMsg');
   var endpoints = [];
@@ -1429,6 +1431,8 @@ async function initResearchSettings() {
     if (settings.research_max_tokens) tokensInput.value = settings.research_max_tokens;
     if (settings.research_extraction_timeout_seconds) extractTimeoutInput.value = settings.research_extraction_timeout_seconds;
     if (settings.research_extraction_concurrency) extractConcurrencyInput.value = settings.research_extraction_concurrency;
+    if (useLibraryToggle) useLibraryToggle.checked = !!settings.research_use_library;
+    if (libraryMaxInput && settings.research_library_max_docs) libraryMaxInput.value = settings.research_library_max_docs;
     if (settings.research_run_timeout_seconds !== undefined && settings.research_run_timeout_seconds !== null) {
       runTimeoutInput.value = settings.research_run_timeout_seconds;
     }
@@ -1449,6 +1453,9 @@ async function initResearchSettings() {
     }
     if (extractConcurrencyInput.value) {
       parts.push('Parallel: ' + extractConcurrencyInput.value);
+    }
+    if (useLibraryToggle && useLibraryToggle.checked) {
+      parts.push('Library: ' + (libraryMaxInput && libraryMaxInput.value ? libraryMaxInput.value : '5') + ' docs');
     }
     if (runTimeoutInput.value !== '') {
       var rtv = parseInt(runTimeoutInput.value, 10);
@@ -1477,6 +1484,9 @@ async function initResearchSettings() {
     if (et && et >= 15 && et <= 3600) payload.research_extraction_timeout_seconds = et;
     var ec = parseInt(extractConcurrencyInput.value, 10);
     if (ec && ec >= 1 && ec <= 12) payload.research_extraction_concurrency = ec;
+    if (useLibraryToggle) payload.research_use_library = !!useLibraryToggle.checked;
+    var ld = parseInt(libraryMaxInput && libraryMaxInput.value, 10);
+    if (ld && ld >= 1 && ld <= 25) payload.research_library_max_docs = ld;
     if (runTimeoutInput.value !== '') {
       var rt = parseInt(runTimeoutInput.value, 10);
       // 0 = no limit (disables the hard timeout); otherwise 60s..86400s (24h)
@@ -1502,6 +1512,8 @@ async function initResearchSettings() {
   tokensInput.addEventListener('change', saveResearch);
   extractTimeoutInput.addEventListener('change', saveResearch);
   extractConcurrencyInput.addEventListener('change', saveResearch);
+  if (useLibraryToggle) useLibraryToggle.addEventListener('change', saveResearch);
+  if (libraryMaxInput) libraryMaxInput.addEventListener('change', saveResearch);
   runTimeoutInput.addEventListener('change', saveResearch);
 
   _registerAiEndpointRefresh(function(nextEndpoints) {
