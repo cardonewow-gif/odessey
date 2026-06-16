@@ -8,6 +8,7 @@ This is the single place that handles:
 - Session lifecycle (create, archive, delete)
 """
 
+import asyncio
 import json
 import uuid
 import logging
@@ -61,7 +62,19 @@ class SessionManager:
     def __init__(self, sessions_file: str = None):
         # sessions_file kept for backward compat, not used
         self.sessions: Dict[str, Session] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         self.load_sessions()
+
+    def session_lock(self, session_id: str) -> asyncio.Lock:
+        """Return (creating if necessary) a per-session asyncio.Lock.
+
+        Callers that mutate session.history must hold this lock for the full
+        read→write window to prevent concurrent paths from racing on the
+        in-memory list (e.g. compact_session vs. stream add_message).
+        """
+        if session_id not in self._locks:
+            self._locks[session_id] = asyncio.Lock()
+        return self._locks[session_id]
 
     # ------------------------------------------------------------------
     # Loading
@@ -307,7 +320,14 @@ class SessionManager:
             db.close()
 
     def replace_messages(self, session_id: str, messages: list) -> bool:
-        """Replace a session's persisted and in-memory history atomically."""
+        """Replace a session's persisted and in-memory history atomically.
+
+        Callers that need to protect a read→replace window from concurrent
+        ``add_message`` calls must hold ``session_lock(session_id)`` across
+        the entire critical section (snapshot + this call).  The DB operations
+        inside are already thread-safe via SQLAlchemy sessions; the lock only
+        guards the in-memory ``session.history`` assignment below.
+        """
         session = self.get_session(session_id)
         db = SessionLocal()
         try:
@@ -524,6 +544,10 @@ class SessionManager:
             # out-of-band); without this it can never be cleared and keeps
             # 404ing on every operation (issue #1044).
             removed_in_memory = self.sessions.pop(session_id, None) is not None
+
+            # Release the per-session lock entry so _locks does not grow
+            # without bound on long-running servers.
+            self._locks.pop(session_id, None)
 
             if db_session or removed_in_memory:
                 # Commit the document-detach / message-delete above (a no-op when

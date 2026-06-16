@@ -393,7 +393,7 @@ def setup_chat_routes(
 
         # Build shared context (preset, preprocess, preface, compact)
         ctx = await build_chat_context(
-            sess, request, chat_handler, chat_processor,
+            sess, request, chat_handler, chat_processor, session_manager,
             message=message,
             session_id=session,
             preset_id=preset_id,
@@ -433,7 +433,8 @@ def setup_chat_routes(
             session_id=session,
         )
         _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
-        sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
+        async with session_manager.session_lock(session):
+            sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
 
         from core.database import update_session_last_accessed
         update_session_last_accessed(session)
@@ -660,7 +661,7 @@ def setup_chat_routes(
 
         # Build shared context (stream path uses enhanced_message for context preface)
         ctx = await build_chat_context(
-            sess, request, chat_handler, chat_processor,
+            sess, request, chat_handler, chat_processor, session_manager,
             message=message,
             session_id=session,
             preset_id=preset_id,
@@ -953,8 +954,14 @@ def setup_chat_routes(
 
                 if not _skip_research:
                     # Phase 2: Start actual research
-                    def _on_research_done(_sid, _result, _sources, _findings):
-                        """Persist research to DB when background task finishes."""
+                    async def _on_research_done(_sid, _result, _sources, _findings):
+                        """Persist research to DB when background task finishes.
+
+                        Acquires the same per-session lock compact_session uses —
+                        this append races with manual compaction the same way the
+                        live stream's add_message does (#2654), just on a much
+                        longer timescale (research can run for minutes).
+                        """
                         if incognito:
                             return
                         try:
@@ -968,7 +975,8 @@ def setup_chat_routes(
                             if _findings:
                                 _md["research_findings"] = _findings
                             _clean_res, _md = clean_thinking_for_save(_result, _md)
-                            _s.add_message(ChatMessage("assistant", _clean_res, metadata=_md))
+                            async with session_manager.session_lock(_sid):
+                                _s.add_message(ChatMessage("assistant", _clean_res, metadata=_md))
                             session_manager.save_sessions()
                             logger.info(f"Research result persisted to DB for session {_sid}")
                         except Exception as _e:
@@ -1103,7 +1111,8 @@ def setup_chat_routes(
                     for _ek in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
                         if _img_result.get(_ek):
                             _ev[_ek] = _img_result[_ek]
-                    sess.add_message(ChatMessage("assistant", full_response, metadata={"tool_events": [_ev], "model": sess.model}))
+                    async with session_manager.session_lock(session):
+                        sess.add_message(ChatMessage("assistant", full_response, metadata={"tool_events": [_ev], "model": sess.model}))
                     session_manager.save_sessions()
                 yield f'data: {json.dumps({"type": "metrics", "data": {"total_time": 0}})}\n\n'
                 yield "data: [DONE]\n\n"
@@ -1201,7 +1210,7 @@ def setup_chat_routes(
                                 }
                                 yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
                             if full_response:
-                                _saved_id = save_assistant_response(
+                                _saved_id = await save_assistant_response(
                                     sess, session_manager, session, full_response, last_metrics,
                                     character_name=ctx.preset.character_name,
                                     web_sources=web_sources,
@@ -1234,7 +1243,8 @@ def setup_chat_routes(
                                 "requested_model": _requested_model,
                             },
                         )
-                        sess.add_message(ChatMessage("assistant", _stopped_content, metadata=_stopped_md))
+                        async with session_manager.session_lock(session):
+                            sess.add_message(ChatMessage("assistant", _stopped_content, metadata=_stopped_md))
                         if not incognito:
                             session_manager.save_sessions()
                     raise
@@ -1249,15 +1259,8 @@ def setup_chat_routes(
                 _actual_model = None
                 try:
                     from src.settings import get_setting
-                    from src.agent_tools import MAX_AGENT_ROUNDS as _DEFAULT_ROUNDS
                     _tool_budget = int(get_setting("agent_max_tool_calls", 0))
-                    # Per-message round cap from settings; clamp defensively in
-                    # case settings.json was hand-edited to a bad value.
-                    try:
-                        _max_rounds = int(get_setting("agent_max_rounds", _DEFAULT_ROUNDS) or _DEFAULT_ROUNDS)
-                    except (TypeError, ValueError):
-                        _max_rounds = _DEFAULT_ROUNDS
-                    _max_rounds = max(1, min(_max_rounds, 200))
+                    _max_rounds = max(1, min(200, int(get_setting("agent_max_rounds", 20))))
 
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
@@ -1333,7 +1336,7 @@ def setup_chat_routes(
                             yield chunk
                         elif chunk == "data: [DONE]\n\n":
                             if full_response:
-                                _saved_id = save_assistant_response(
+                                _saved_id = await save_assistant_response(
                                     sess, session_manager, session, full_response, last_metrics,
                                     character_name=ctx.preset.character_name,
                                     web_sources=web_sources,
@@ -1375,7 +1378,8 @@ def setup_chat_routes(
                                     "requested_model": _requested_model,
                                 },
                             )
-                            sess.add_message(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
+                            async with session_manager.session_lock(session):
+                                sess.add_message(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
                             if not incognito:
                                 session_manager.save_sessions()
                     except Exception:
@@ -1467,7 +1471,8 @@ def setup_chat_routes(
         try:
             sess = session_manager.get_session(session_id)
             msg = untrusted_context_message("injected research context", f"Research Context: {context}")
-            sess.add_message(ChatMessage(msg["role"], msg["content"], metadata=msg.get("metadata")))
+            async with session_manager.session_lock(session_id):
+                sess.add_message(ChatMessage(msg["role"], msg["content"], metadata=msg.get("metadata")))
             session_manager.save_sessions()
             return {"status": "context_injected"}
         except KeyError:

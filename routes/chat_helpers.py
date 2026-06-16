@@ -325,12 +325,13 @@ async def preprocess(
     )
 
 
-def add_user_message(sess, chat_handler, preprocessed: PreprocessedMessage, incognito: bool = False):
+async def add_user_message(sess, chat_handler, preprocessed: PreprocessedMessage, session_manager, session_id: str, incognito: bool = False):
     """Add user message to session history and update session name.
     In incognito mode, still add to in-memory history (for conversation context)
     but skip session name update (which would persist)."""
     user_meta = {"attachments": preprocessed.attachment_meta} if preprocessed.attachment_meta else None
-    sess.add_message(ChatMessage("user", preprocessed.user_content, metadata=user_meta))
+    async with session_manager.session_lock(session_id):
+        sess.add_message(ChatMessage("user", preprocessed.user_content, metadata=user_meta))
     if not incognito:
         chat_handler.update_session_name_if_needed(sess, preprocessed.text_for_context)
 
@@ -525,6 +526,7 @@ async def build_chat_context(
     request,
     chat_handler,
     chat_processor,
+    session_manager,
     message: str,
     session_id: str,
     preset_id=None,
@@ -562,7 +564,7 @@ async def build_chat_context(
     )
 
     # Add user message to history
-    add_user_message(sess, chat_handler, preprocessed, incognito=incognito)
+    await add_user_message(sess, chat_handler, preprocessed, session_manager, session_id, incognito=incognito)
 
     # Fire events
     if not incognito:
@@ -884,7 +886,7 @@ def clean_thinking_for_save(content: str, metadata: dict | None = None) -> tuple
     return content, md
 
 
-def save_assistant_response(
+async def save_assistant_response(
     sess,
     session_manager,
     session_id: str,
@@ -933,14 +935,13 @@ def save_assistant_response(
     # Extract thinking into metadata (don't pollute message content with <think> tags)
     _think_info = _extract_thinking_meta(full_response)
     if _think_info:
-        if _think_info.get("thinking"):
-            md["thinking"] = _think_info["thinking"]
-        if _think_info.get("time"):
-            md["thinking_time"] = _think_info.get("time")
+        md["thinking"] = _think_info["thinking"]
+        md["thinking_time"] = _think_info.get("time")
         _content = _think_info["reply"]
     else:
         _content = full_response
-    sess.add_message(ChatMessage("assistant", _content, metadata=md))
+    async with session_manager.session_lock(session_id):
+        sess.add_message(ChatMessage("assistant", _content, metadata=md))
 
     if not incognito:
         from core.database import update_session_last_accessed
