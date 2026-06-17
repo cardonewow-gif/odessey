@@ -267,6 +267,11 @@ _DOMAIN_RULES = {
 - Use `resolve_contact` to look up a contact's email or phone number by name. Searches the CardDAV address book and sent email history.
 - Use `manage_contact` to list, add, update, or delete contacts in the address book.
 - Do NOT use `manage_memory` for contact lookups — contact details live in the address book, not memory.""",
+    "images": """\
+## Image rules
+- Use `generate_image` to create an image from a text prompt; make ONE call per image (call it twice to produce two images).
+- Use `edit_image` for an existing gallery image (upscale, remove background, inpaint, harmonize).
+- Do NOT use memory/notes tools to fulfil an image-generation request.""",
 }
 
 _DOMAIN_TOOL_MAP = {
@@ -280,6 +285,7 @@ _DOMAIN_TOOL_MAP = {
     "files": {"bash", "python", "read_file", "write_file", "edit_file", "grep", "glob", "ls", "get_workspace"},
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
+    "images": {"generate_image", "edit_image"},
 }
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
@@ -755,6 +761,41 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
     return False
 
 
+_IMAGE_TOOL_NAMES = {"generate_image", "edit_image"}
+
+
+def _assistant_used_image_tool(messages: List[Dict], lookback: int = 4) -> bool:
+    """True if one of the last ``lookback`` assistant turns actually used an image
+    tool (generate_image/edit_image).
+
+    A vague image follow-up ("do another", "try again to match your vision")
+    references the prior image only anaphorically, so it matches no domain keyword
+    and would hit the low_signal short-circuit that strips every tool — leaving a
+    small model to confabulate a fake generation instead of regenerating. When
+    recent image tool use is detected we re-arm the images domain. Two signals:
+    the recorded tool_events metadata, and (fallback) a generated-image URL in the
+    turn content (robust to whether metadata is threaded into the messages).
+    """
+    checked = 0
+    for msg in reversed(messages):
+        if msg.get("role") != "assistant":
+            continue
+        checked += 1
+        if checked > lookback:
+            break
+        events = (msg.get("metadata") or {}).get("tool_events") or []
+        if isinstance(events, list) and any(
+            isinstance(e, dict) and e.get("tool") in _IMAGE_TOOL_NAMES for e in events
+        ):
+            return True
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+        if "/api/generated-image/" in str(content or ""):
+            return True
+    return False
+
+
 def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, object]:
     """Classify only whether this turn deserves domain tool retrieval.
 
@@ -815,6 +856,19 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("settings")
     if has(r"\b(contact|contacts|phone|phone number|address book|vcard)\b"):
         domains.add("contacts")
+    if has(r"\b(images?|pictures?|photos?|drawings?|draw|sketch|illustrations?|illustrate|render|artwork|portrait|wallpaper|logo|icon|avatar)\b",
+           r"\b(generate|make|create|draw|design)\b.*\bimage", r"\b(upscale|inpaint|remove background|rembg)\b"):
+        domains.add("images")
+
+    # A vague follow-up right after a real image turn ("do another", "try again to
+    # match your vision") refers to the image only anaphorically — no keyword — so
+    # it would be flagged low_signal and stripped of generate_image, leaving the
+    # model to confabulate a fake generation. If a recent assistant turn actually
+    # used an image tool, re-arm the images domain. Additive: retrieval_query and
+    # any other matched domains are untouched, so genuine new requests still
+    # classify normally (e.g. "now email it" keeps email AND gains images).
+    if "images" not in domains and _assistant_used_image_tool(messages):
+        domains.add("images")
 
     low_signal = not continuation and not domains
     return {
