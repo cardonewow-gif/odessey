@@ -477,6 +477,19 @@ def setup_chat_routes(
         use_research = form_data.get("use_research")
         time_filter = form_data.get("time_filter")
         preset_id = form_data.get("preset_id")
+        # Auto mode: full autonomous agent. Forces agent tools on, raises the
+        # round/tool-call caps, drops the ask_user pause (so the agent finishes
+        # the task instead of stopping for a button) and ignores guide-only
+        # phrasing. UI-selectable per turn.
+        auto_mode = str(
+            form_data.get("auto") or (body or {}).get("auto") or ""
+        ).lower() == "true"
+        # Parallel mode: make the spawn_agents tool available so the agent can
+        # fan out independent work across several concurrent autonomous agents.
+        # Off by default — disabled below so it never fires unprompted.
+        parallel_mode = str(
+            form_data.get("parallel") or (body or {}).get("parallel") or ""
+        ).lower() == "true"
         # Issue #3229: API callers send JSON, not FormData.  Read from the
         # JSON body as fallback so callers who send {"allow_bash": true}
         # actually get bash enabled.
@@ -526,6 +539,19 @@ def setup_chat_routes(
                 _tool_intent.category,
                 _tool_intent.reason,
             )
+        # Auto mode is agent mode with the guardrails opened up. Force the full
+        # agent loop (tools on) and treat it as an explicit agent request.
+        if auto_mode:
+            chat_mode = "agent"
+            user_requested_agent = True
+            auto_escalated = False  # not a light promotion — full tools wanted
+            logger.info("auto mode: full autonomous agent loop")
+        # Parallel mode needs the full agent loop (it spawns child agent loops).
+        if parallel_mode:
+            chat_mode = "agent"
+            user_requested_agent = True
+            auto_escalated = False
+            logger.info("parallel mode: spawn_agents enabled")
         active_doc_id = form_data.get("active_doc_id", "").strip()
         logger.info(f"[doc-inject] chat_mode={chat_mode}, active_doc_id={active_doc_id!r}")
 
@@ -866,9 +892,21 @@ def setup_chat_routes(
             from src.tool_security import plan_mode_disabled_tools
             disabled_tools.update(plan_mode_disabled_tools())
 
+        # spawn_agents is base-available (ALWAYS_AVAILABLE) so the Parallel toggle
+        # can surface it deterministically; keep it disabled unless the toggle is
+        # on, so ordinary turns never fan out unprompted.
+        if not parallel_mode:
+            disabled_tools.add("spawn_agents")
+
+        # Auto mode pauses for nothing: drop ask_user so the agent can't stall
+        # waiting on a button, and ignore guide-only phrasing (the user asked for
+        # full autonomy, so a stray "don't use tools" must not disarm it).
+        if auto_mode:
+            disabled_tools.add("ask_user")
+
         tool_policy = build_effective_tool_policy(
             disabled_tools=disabled_tools,
-            last_user_message=message,
+            last_user_message="" if auto_mode else message,
         )
         disabled_tools = tool_policy.all_disabled_names()
         research_blocked_by_policy = bool(
@@ -1258,6 +1296,11 @@ def setup_chat_routes(
                     except (TypeError, ValueError):
                         _max_rounds = _DEFAULT_ROUNDS
                     _max_rounds = max(1, min(_max_rounds, 200))
+                    # Auto mode runs long and uninterrupted: unlimited tool calls
+                    # and a high round floor (still capped at the 200 hard limit).
+                    if auto_mode:
+                        _tool_budget = 0
+                        _max_rounds = min(200, max(_max_rounds, 100))
 
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
