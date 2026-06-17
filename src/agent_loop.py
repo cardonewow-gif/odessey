@@ -267,6 +267,11 @@ _DOMAIN_RULES = {
 - Use `resolve_contact` to look up a contact's email or phone number by name. Searches the CardDAV address book and sent email history.
 - Use `manage_contact` to list, add, update, or delete contacts in the address book.
 - Do NOT use `manage_memory` for contact lookups — contact details live in the address book, not memory.""",
+    "images": """\
+## Image rules
+- Use `generate_image` to create an image from a text prompt; make ONE call per image (call it twice to produce two images).
+- Use `edit_image` for an existing gallery image (upscale, remove background, inpaint, harmonize).
+- Do NOT use memory/notes tools to fulfil an image-generation request.""",
 }
 
 _DOMAIN_TOOL_MAP = {
@@ -280,6 +285,7 @@ _DOMAIN_TOOL_MAP = {
     "files": {"bash", "python", "read_file", "write_file", "edit_file", "grep", "glob", "ls", "get_workspace"},
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
+    "images": {"generate_image", "edit_image"},
 }
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
@@ -815,6 +821,9 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("settings")
     if has(r"\b(contact|contacts|phone|phone number|address book|vcard)\b"):
         domains.add("contacts")
+    if has(r"\b(images?|pictures?|photos?|drawings?|draw|sketch|illustrations?|illustrate|render|artwork|portrait|wallpaper|logo|icon|avatar)\b",
+           r"\b(generate|make|create|draw|design)\b.*\bimage", r"\b(upscale|inpaint|remove background|rembg)\b"):
+        domains.add("images")
 
     low_signal = not continuation and not domains
     return {
