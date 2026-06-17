@@ -31,7 +31,13 @@ def test_server_uses_trusted_underscore_owner_not_model_owner():
         captured.setdefault("owner", owner)
         raise ValueError("short-circuit before any network call")
 
-    with patch("src.ai_interaction._resolve_model", fake_resolve):
+    # Pin the settings call_tool reads (the image_gen_enabled gate + load_settings) so
+    # it always reaches _resolve_model. They come from a process-wide cache another test
+    # can leave dirty; if image_gen_enabled reads falsy, call_tool short-circuits before
+    # resolution and this becomes a false negative — observed as a CI-only isolation flake.
+    with patch("src.ai_interaction._resolve_model", fake_resolve), \
+         patch("src.settings.get_setting", lambda k, d=None: True if k == "image_gen_enabled" else d), \
+         patch("src.settings.load_settings", lambda: {}):
         _run(srv.call_tool("generate_image",
                            {"prompt": "a cat", "_owner": "alice", "owner": "bob"}))
     assert captured.get("owner") == "alice"
@@ -45,7 +51,9 @@ def test_server_ignores_model_owner_without_trusted_injection():
         captured.setdefault("owner", owner)
         raise ValueError("short-circuit")
 
-    with patch("src.ai_interaction._resolve_model", fake_resolve):
+    with patch("src.ai_interaction._resolve_model", fake_resolve), \
+         patch("src.settings.get_setting", lambda k, d=None: True if k == "image_gen_enabled" else d), \
+         patch("src.settings.load_settings", lambda: {}):
         _run(srv.call_tool("generate_image", {"prompt": "a cat", "owner": "bob"}))
     assert captured.get("owner") is None
 
