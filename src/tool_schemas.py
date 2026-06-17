@@ -767,6 +767,25 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "manage_atlas",
+            "description": "Read, write and query the user's Atlas markdown vault (an Obsidian-style folder of .md notes with [[wikilinks]], #tags, frontmatter properties, backlinks and a link graph). action='list' lists notes; 'read' returns a note plus its resolved out-links and back-links; 'write' creates/overwrites a note; 'append' adds to one; 'delete' removes one; 'search' finds notes by text or '#tag'; 'backlinks' lists notes linking to one; 'graph' returns the whole link graph; 'query' runs a structured Bases query over frontmatter properties and heading sections. Use [[Note name]] in content to link notes. Use this for the user's personal knowledge base / vault — not the Documents editor (manage_documents) or Keep-style notes (manage_notes).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "read", "write", "append", "delete", "search", "backlinks", "graph", "query"]},
+                    "path": {"type": "string", "description": "Vault-relative note path, e.g. 'Projects/Ideas.md' (.md added if omitted). For read/write/append/delete/backlinks."},
+                    "content": {"type": "string", "description": "Markdown body (for write/append). Use [[Other note]] to link."},
+                    "query": {"description": "For action='search': a search string or '#tag'. For action='query': a structured Bases query OBJECT — {from:'notes'|'sections', where:{join:'and'|'or', filters:[{field,op,value}]}, select, sort, group_by, limit}. Fields: file.path/title/tags/mtime/folder, prop.<name>, section.heading/body/level. Ops: eq ne contains startswith endswith regex gt lt gte lte exists empty in. Example (todo sections still open): {from:'sections', where:{join:'and', filters:[{field:'section.heading',op:'eq',value:'todo'},{field:'prop.status',op:'eq',value:'open'}]}}."},
+                    "search": {"type": "string", "description": "Optional substring filter (for list)."},
+                    "limit": {"type": "integer", "description": "Max results / read length."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "manage_settings",
             "description": "Manage user preferences and settings. Use `disable_tool`/`enable_tool`/`list_tools` to turn individual tools on or off globally (e.g. shell, search, browser, documents, memory, skills, images, tasks, notes, calendar, email). Use list/get/set/delete for free-form preferences.",
             "parameters": {
