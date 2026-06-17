@@ -621,7 +621,7 @@ async def build_chat_context(
     )
     if use_rag is not None or is_research_spinoff:
         _preface_kwargs["use_rag"] = use_rag_val
-    preface, rag_sources, web_sources = chat_processor.build_context_preface(**_preface_kwargs)
+    preface, rag_sources, web_sources = await chat_processor.build_context_preface(**_preface_kwargs)
 
     # Capture used memories immediately
     used_memories = getattr(chat_processor, '_last_used_memories', [])
@@ -1022,6 +1022,7 @@ def run_post_response_tasks(
     memory_manager,
     memory_vector,
     webhook_manager,
+    memory_provider=None,
     *,
     incognito: bool = False,
     compare_mode: bool = False,
@@ -1047,6 +1048,19 @@ def run_post_response_tasks(
     ``_queue_background_extraction`` keeps them from overlapping the *next*
     turn's request too.
     """
+    # Episodic memory ingestion — always record the exchange (fast, no LLM)
+    if not incognito and not compare_mode and memory_provider is not None:
+        try:
+            asyncio.create_task(memory_provider.ingest_episodic(
+                [
+                    {"role": "user", "text": message},
+                    {"role": "assistant", "text": full_response},
+                ],
+                session_id=session_id,
+            ))
+        except Exception as e:
+            logger.warning("Episodic ingestion failed: %s", e)
+
     _extraction_jobs: list = []
 
     # Memory extraction — only every 4th message pair to avoid excess LLM calls

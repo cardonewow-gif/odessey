@@ -337,6 +337,7 @@ def setup_chat_routes(
     memory_vector=None,
     webhook_manager=None,
     skills_manager=None,
+    memory_provider=None,
 ) -> APIRouter:
     router = APIRouter(tags=["chat"])
 
@@ -443,6 +444,7 @@ def setup_chat_routes(
         run_post_response_tasks(
             sess, session_manager, session, message, reply, None,
             ctx.uprefs, memory_manager, memory_vector, webhook_manager,
+            memory_provider=memory_provider,
             character_name=ctx.preset.character_name,
             owner=ctx.user,
             allow_background_extraction=not tool_policy.block_all_tool_calls,
@@ -1216,6 +1218,7 @@ def setup_chat_routes(
                                 run_post_response_tasks(
                                     sess, session_manager, session, message, full_response,
                                     last_metrics, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
+                                    memory_provider=memory_provider,
                                     incognito=incognito, compare_mode=compare_mode,
                                     character_name=ctx.preset.character_name,
                                     owner=_user,
@@ -1346,6 +1349,7 @@ def setup_chat_routes(
                                 run_post_response_tasks(
                                     sess, session_manager, session, message, full_response,
                                     last_metrics, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
+                                    memory_provider=memory_provider,
                                     incognito=incognito, compare_mode=compare_mode,
                                     character_name=ctx.preset.character_name,
                                                             agent_rounds=_agent_rounds,

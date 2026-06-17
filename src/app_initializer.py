@@ -1,5 +1,6 @@
 # src/app_initializer.py
 """Initialize all application components and dependencies."""
+import json
 import os
 import logging
 from typing import Dict, Any
@@ -9,7 +10,8 @@ from src.constants import (
     SESSIONS_FILE, DEFAULT_HOST, OPENAI_API_KEY
 )
 from src.memory import MemoryManager
-from src.memory_provider import MemoryProviderRegistry, NativeMemoryProvider
+from src.memory_provider import MemoryProviderRegistry
+from src.memory_engine import EnhancedMemoryProvider, TopicClassifier
 from services.memory.skills import SkillsManager
 from core.session_manager import SessionManager
 from core.models import set_session_manager
@@ -25,11 +27,13 @@ from src.search import update_search_config
 
 logger = logging.getLogger(__name__)
 
+
 def create_directories():
     """Create necessary directories if they don't exist."""
     for directory in (DATA_DIR, PERSONAL_DIR, RUNBOOK_DIR, UPLOAD_DIR):
         os.makedirs(directory, exist_ok=True)
-        
+
+
 def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     """
     Initialize all manager and handler instances.
@@ -74,14 +78,35 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
         logger.warning(f"MemoryVectorStore DEGRADED: {e}")
         memory_vector = None
 
-    memory_provider_registry = MemoryProviderRegistry([
-        NativeMemoryProvider(memory_manager, memory_vector),
-    ])
+    # --- Enhanced memory provider (TRACE-style hierarchical memory) ---
+    from src.settings import get_setting
+    use_llm_topics = get_setting("memory_llm_topic_classification", False)
+    branch_threshold = get_setting("memory_topic_branch_threshold", 0.4)
+
+    topic_classifier = TopicClassifier(
+        use_llm=use_llm_topics,
+        branch_threshold=branch_threshold,
+    )
+
+    memory_provider = EnhancedMemoryProvider(
+        memory_manager,
+        memory_vector=memory_vector,
+        data_dir=DATA_DIR,
+        topic_classifier=topic_classifier,
+    )
+
+    memory_provider_registry = MemoryProviderRegistry([memory_provider])
 
     # Initialize processors
-    chat_processor = ChatProcessor(memory_manager, personal_docs_manager, memory_vector=memory_vector, skills_manager=skills_manager)
+    chat_processor = ChatProcessor(
+        memory_manager,
+        personal_docs_manager,
+        memory_vector=memory_vector,
+        skills_manager=skills_manager,
+        memory_provider=memory_provider,
+    )
     research_handler = ResearchHandler()
-    
+
     # Initialize chat handler with all dependencies
     chat_handler = ChatHandler(
         session_manager=session_manager,
@@ -91,19 +116,20 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
         preset_manager=preset_manager,
         upload_handler=upload_handler,
     )
-    
+
     # Initialize model discovery
     model_discovery = ModelDiscovery(DEFAULT_HOST, OPENAI_API_KEY)
-    
+
     # Load and apply saved API keys
     saved_keys = api_key_manager.load()
     if "brave" in saved_keys:
         update_search_config(api_key=saved_keys["brave"])
         logger.info("Loaded Brave API key from saved configuration")
-    
+
     return {
         "memory_manager": memory_manager,
         "memory_vector": memory_vector,
+        "memory_provider": memory_provider,
         "memory_provider_registry": memory_provider_registry,
         "skills_manager": skills_manager,
         "session_manager": session_manager,
