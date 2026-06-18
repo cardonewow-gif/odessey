@@ -199,12 +199,14 @@ async function _fetchCalendars() {
   }
 }
 
-// Trigger a CalDAV pull. `interactive=true` waits for the result and
+// Trigger a CalDAV sync. `interactive=true` waits for the result and
 // refreshes the UI; false fires-and-forgets (used on first open). Both
 // no-op silently if CalDAV isn't configured.
-async function _syncCaldav(interactive) {
+// `direction` defaults to "pull" (first-open background sync) but the
+// toolbar Sync button passes "both" so push and pull run together.
+async function _syncCaldav(interactive, direction = "pull") {
   try {
-    const res = await fetch(`${API_BASE}/api/calendar/sync`, {
+    const res = await fetch(`${API_BASE}/api/calendar/sync?direction=${encodeURIComponent(direction)}`, {
       method: 'POST', credentials: 'same-origin',
     });
     const data = await res.json().catch(() => ({}));
@@ -386,7 +388,7 @@ function _eventsForDay(dateStr) {
     // Multi-day timed events: show on each day they span
     const startDate = _localDateOf(e.dtstart);
     const endDate = _localDateOf(e.dtend);
-    if (startDate !== endDate) return startDate <= dateStr && endDate >= dateStr;
+    if (startDate !== endDate) return startDate <= dateStr && endDate > dateStr;
     return startDate === dateStr;
   });
 }
@@ -959,34 +961,10 @@ async function _renderMonth() {
   const dow = _weekStartSun ? first.getDay() : (first.getDay() + 6) % 7;
   const gs = new Date(y, m, 1 - dow);
 
-  const multiDay = _events.filter(e => {
-    if (!_eventVisible(e)) return false;
-    const startD = new Date(e.dtstart), endD = new Date(e.dtend);
-    return Math.round((endD - startD) / 86400000) > 1 || (!e.all_day && _localDateOf(e.dtstart) !== _localDateOf(e.dtend));
-  });
-  const multiUids = new Set(multiDay.map(e => e.uid));
-
-  // Render 6 week rows. Each row is a positioned container that holds
-  // 7 day cells AND any multi-day bars that span the row, drawn as an
-  // absolute overlay on top of the cells. This avoids the old "each
-  // bar lives inside its start cell and gets clipped at the cell edge"
-  // problem so a multi-day event reads as one continuous line across
-  // every day it covers.
+  // Render 6 week rows. Each row is a container that holds 7 day cells.
+  // Multi-day events are shown as inline dots on each day they intersect.
   for (let row = 0; row < 6; row++) {
-    // Count how many multi-day bars overlap any column in this row so
-    // cells can reserve top padding for them — otherwise the bars
-    // (drawn as absolute overlays) sit on top of the day-number and
-    // single-event rows below.
-    const rowStartCd0 = new Date(gs); rowStartCd0.setDate(gs.getDate() + row * 7);
-    const rowEndCd0 = new Date(gs); rowEndCd0.setDate(gs.getDate() + row * 7 + 6);
-    const rowStart0 = _ds(rowStartCd0);
-    const rowEnd0 = _ds(rowEndCd0);
-    const barsInRow = multiDay.filter(md => {
-      const mdStart = _localDateOf(md.dtstart);
-      const mdEnd = _localDateOf(md.dtend);
-      return !(mdEnd < rowStart0 || mdStart > rowEnd0);
-    }).length;
-    h += `<div class="cal-week-row" style="--bars:${barsInRow}">`;
+    h += `<div class="cal-week-row">`;
     // Day cells for this row
     for (let col = 0; col < 7; col++) {
       const i = row * 7 + col;
@@ -995,9 +973,8 @@ async function _renderMonth() {
       const isOther = cd.getMonth() !== m;
       const cls = 'cal-day' + (isOther ? ' cal-other' : '') + (d === today ? ' cal-today' : '') + (d === _selectedDay ? ' cal-selected' : '');
       h += `<div class="${cls}" data-date="${d}"><span class="cal-day-num">${cd.getDate()}</span>`;
-      // Single events — show up to 3 inline rows (multi-day events are
-      // drawn separately as an overlay below).
-      const singles = _eventsForDay(d).filter(e => !multiUids.has(e.uid));
+      // Events — show up to 3 inline rows per cell.
+      const singles = _eventsForDay(d);
       if (singles.length) {
         const maxInline = window.innerWidth <= 768 ? 2 : 3;
         const showInline = singles.slice(0, maxInline);
@@ -1016,59 +993,6 @@ async function _renderMonth() {
         if (singles.length > maxInline) h += `<div class="cal-event-more">+${singles.length - maxInline} more</div>`;
       }
       h += '</div>';
-    }
-    // Multi-day overlay bars for this row. Stack each bar one slot below
-    // the previous so two events on the same row don't overlap.
-    let barSlot = 0;
-    for (const md of multiDay) {
-      const mdStart = _localDateOf(md.dtstart);
-      const mdEnd = _localDateOf(md.dtend);
-      // Compute the row's date range
-      const rowStartCd = new Date(gs); rowStartCd.setDate(gs.getDate() + row * 7);
-      const rowEndCd = new Date(gs); rowEndCd.setDate(gs.getDate() + row * 7 + 6);
-      const rowStart = _ds(rowStartCd);
-      const rowEnd = _ds(rowEndCd);
-      if (mdEnd < rowStart || mdStart > rowEnd) continue; // not in this row
-      // Column within the row where the bar starts and how many days it spans
-      const startCol = mdStart < rowStart ? 0 : ((new Date(mdStart + 'T00:00:00') - rowStartCd) / 86400000);
-      const endCol   = mdEnd > rowEnd     ? 6 : ((new Date(mdEnd   + 'T00:00:00') - rowStartCd) / 86400000);
-      const startColInt = Math.round(startCol);
-      const endColInt = Math.round(endCol);
-      const span = endColInt - startColInt + 1;
-      // Proportional offsets for timed events that span across midnight
-      // (e.g. 8 PM Mon → 5 AM Tue). Without this, an overnight serve
-      // window visually fills the ENTIRE next day even when it only
-      // covers a few hours. All-day events keep the full-day shape.
-      // Bar visually spans from column (col+startFrac) to (col+span-1+endFrac),
-      // so a 8 PM→5 AM run shows ~17% of day 1 + ~21% of day 2, not 200%.
-      let startFrac = 0;
-      let endFrac = 1;
-      if (!md.all_day) {
-        try {
-          const sIso = md.dtstart || '';
-          const eIso = md.dtend || '';
-          const sDate = sIso ? new Date(sIso) : null;
-          const eDate = eIso ? new Date(eIso) : null;
-          // First-visible-day fraction (0 = midnight start). Clamp to 0
-          // when the event started before this row, so the bar still
-          // starts at the row's left edge.
-          if (sDate && !isNaN(sDate) && mdStart >= rowStart) {
-            const midnight = new Date(sDate); midnight.setHours(0, 0, 0, 0);
-            startFrac = Math.max(0, Math.min(1, (sDate - midnight) / 86400000));
-          }
-          if (eDate && !isNaN(eDate) && mdEnd <= rowEnd) {
-            const midnight = new Date(eDate); midnight.setHours(0, 0, 0, 0);
-            endFrac = Math.max(0, Math.min(1, (eDate - midnight) / 86400000));
-            // CalDAV end-times are exclusive: an event ending at exactly
-            // 00:00 on day N really ended at end-of-day N-1, so endFrac=0
-            // would visually paint a zero-width slice. Snap to a small
-            // visible minimum (5% of a day) so the bar still registers.
-            if (endFrac === 0) endFrac = 1;
-          }
-        } catch (_) { startFrac = 0; endFrac = 1; }
-      }
-      h += `<div class="cal-multiday" style="--col:${startColInt};--span:${span};--slot:${barSlot};--start-frac:${startFrac.toFixed(4)};--end-frac:${endFrac.toFixed(4)};background:${_calColor(md)};--cal-event-fg:${_calEventFg(md)}" draggable="true" data-uid="${_e(md.uid)}" title="${_e(md.summary)}">${_e(md.summary)}</div>`;
-      barSlot++;
     }
     h += '</div>';
   }
@@ -2152,6 +2076,7 @@ function _wireAll(body) {
     try {
       await Promise.all([
         _fetchEvents(_range[0], _range[1], /*force*/ true).catch(() => {}),
+        _syncCaldav(true, "both").catch(() => {}),
         minSpin,
       ]);
     } finally {
@@ -2668,7 +2593,7 @@ async function _showCalSettings() {
     const status = overlay.querySelector('#cal-settings-sync-status');
     btn.disabled = true;
     status.textContent = 'Syncing…';
-    const data = await _syncCaldav(true) || {};
+    const data = await _syncCaldav(true, "both") || {};
     if (data.errors && data.errors.length) {
       status.textContent = `Sync failed: ${data.errors[0]}`;
     } else {

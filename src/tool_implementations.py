@@ -14,6 +14,11 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 from src.constants import MAX_READ_CHARS, DEEP_RESEARCH_DIR, VAULT_FILE
+from src.tool_execution import (
+    assert_mutating_action_allowed,
+    assert_mutating_http_method_allowed,
+    assert_not_readonly,
+)
 from src.tool_utils import get_mcp_manager
 from core.constants import internal_api_base
 from routes._validators import validate_remote_host, validate_ssh_port
@@ -175,6 +180,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         return {"error": "Invalid JSON arguments", "exit_code": 1}
 
     action = (args.get("action") or "").lower()
+    assert_mutating_action_allowed("manage_skills", action, {"add", "edit", "patch", "publish", "delete"})
     from services.memory.skills import SkillsManager
     from services.memory.skill_format import Skill, slugify
     from src.constants import DATA_DIR
@@ -409,6 +415,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
         return {"error": "Invalid JSON arguments", "exit_code": 1}
 
     action = args.get("action", "list")
+    assert_mutating_action_allowed("manage_tasks", action, {"create", "edit", "delete", "pause", "resume", "run"})
     db = SessionLocal()
     try:
         if action == "list":
@@ -601,6 +608,7 @@ async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict
         return {"error": "Invalid JSON arguments", "exit_code": 1}
 
     action = args.get("action", "list")
+    assert_mutating_action_allowed("manage_endpoints", action, {"add", "delete", "enable", "disable"})
     db = SessionLocal()
     try:
         if action == "list":
@@ -796,6 +804,7 @@ async def do_manage_mcp(content: str, owner: Optional[str] = None) -> Dict:
         return {"error": "Invalid JSON arguments", "exit_code": 1}
 
     action = args.get("action", "list")
+    assert_mutating_action_allowed("manage_mcp", action, {"add", "delete", "reconnect", "enable", "disable"})
 
     if action == "list":
         mcp = get_mcp_manager()
@@ -952,6 +961,7 @@ async def do_manage_webhooks(content: str, owner: Optional[str] = None) -> Dict:
         return {"error": "Invalid JSON arguments", "exit_code": 1}
 
     action = args.get("action", "list")
+    assert_mutating_action_allowed("manage_webhooks", action, {"add", "delete", "enable", "disable", "test"})
     db = SessionLocal()
     try:
         from core.database import Webhook
@@ -1024,6 +1034,7 @@ async def do_manage_tokens(content: str, owner: Optional[str] = None) -> Dict:
         return {"error": "Invalid JSON arguments", "exit_code": 1}
 
     action = args.get("action", "list")
+    assert_mutating_action_allowed("manage_tokens", action, {"create", "delete"})
     db = SessionLocal()
     try:
         if action == "list":
@@ -1076,6 +1087,7 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
         return {"error": "Invalid JSON arguments", "exit_code": 1}
 
     action = args.get("action", "list")
+    assert_mutating_action_allowed("manage_settings", action, {"set", "delete", "reset", "disable_tool", "enable_tool"})
 
     from core.database import SessionLocal
     db = SessionLocal()
@@ -1358,6 +1370,9 @@ async def do_api_call(content: str) -> Dict:
             except json.JSONDecodeError:
                 pass
 
+    method = str(args.get("method", "GET")).upper()
+    assert_mutating_http_method_allowed("api_call", method)
+
     integration_name = args.get("integration", "")
     integrations = load_integrations()
     intg = next((i for i in integrations if i["id"] == integration_name
@@ -1368,7 +1383,7 @@ async def do_api_call(content: str) -> Dict:
 
     return await execute_api_call(
         intg["id"],
-        args.get("method", "GET"),
+        method,
         args.get("path", "/"),
         params=args.get("params"),
         body=args.get("body"),
@@ -1403,6 +1418,7 @@ async def do_manage_notes(content: str, owner: Optional[str] = None) -> Dict:
         "remove_item": "toggle_item",
     }
     action = _NOTE_ACTION_ALIASES.get(action, action)
+    assert_mutating_action_allowed("manage_notes", action, {"add", "update", "delete", "toggle_item"})
     db = SessionLocal()
 
     def _norm_note_title(value: str) -> str:
@@ -1693,6 +1709,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
         "list": "list_events",
     }
     action = _ACTION_ALIASES.get(action, action)
+    assert_mutating_action_allowed("manage_calendar", action, {"create_event", "update_event", "delete_event"})
     db = SessionLocal()
 
     def _calendar_query():
@@ -2032,7 +2049,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 )
             db.commit()
             if cal.source == "caldav":
-                await _push_caldav_event_after_commit(owner, uid, "create")
+                asyncio.create_task(_push_caldav_event_after_commit(owner, uid, "create"))
             tag_blurb = f" [{event_type}]" if event_type else ""
             if minutes_before is None:
                 reminder_blurb = ""
@@ -2095,7 +2112,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 ev.caldav_sync_pending = "update"
             db.commit()
             if is_caldav:
-                await _push_caldav_event_after_commit(owner, base_uid, "update")
+                asyncio.create_task(_push_caldav_event_after_commit(owner, base_uid, "update"))
             return {"response": f"Updated event {uid}", "exit_code": 0}
 
         elif action == "delete_event":
@@ -2115,7 +2132,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             db.delete(ev)
             db.commit()
             if is_caldav:
-                await _push_caldav_event_after_commit(owner, base_uid, "delete")
+                asyncio.create_task(_push_caldav_event_after_commit(owner, base_uid, "delete"))
             return {"response": f"Deleted event {uid}", "exit_code": 0}
 
         else:
@@ -2551,6 +2568,7 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
     method = (args.get("method") or "GET").upper()
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         return {"error": f"Unsupported method: {method}", "exit_code": 1}
+    assert_mutating_http_method_allowed("app_api", method)
     if any(method == m and path.startswith(p) for m, p in _APP_API_BLOCKLIST_METHOD_PATH):
         if "/api/email/accounts" in path:
             return {"error": "Don't use /api/email/accounts via app_api — it is owner-filtered in tool context and may return empty. Use the `list_email_accounts` email tool, then pass `account` to list_emails/read_email.", "exit_code": 1}
@@ -3087,6 +3105,7 @@ async def _cookbook_kill_session(session_id: str, *, remote_host: str = "",
 
 async def do_stop_served_model(content: str, owner: Optional[str] = None) -> Dict:
     """Stop a running model server by killing its tmux session (remote-aware)."""
+    assert_not_readonly("stop_served_model")
     try:
         args = _parse_tool_args(content)
     except ValueError:
@@ -3252,6 +3271,7 @@ async def do_list_downloads(content: str, owner: Optional[str] = None) -> Dict:
 
 async def do_cancel_download(content: str, owner: Optional[str] = None) -> Dict:
     """Cancel a model download by killing its tmux session (remote-aware)."""
+    assert_not_readonly("cancel_download")
     try:
         args = _parse_tool_args(content)
     except ValueError:
