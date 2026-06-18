@@ -280,8 +280,26 @@ class ChatProcessor:
         web_sources = []
         if use_web:
             try:
+                from src.llm_core import llm_call
+                from src.task_endpoint import resolve_task_endpoint
+                t_url, t_model, t_headers = resolve_task_endpoint(owner=owner)
+                if not t_model:
+                    t_url, t_model, t_headers = session.endpoint_url, session.model, session.headers
+
+                search_query = llm_call(
+                    t_url,
+                    t_model,
+                    [{"role": "system", "content": "Extract a concise search query from the user's message. Reply ONLY with the query."}, 
+                     {"role": "user", "content": message}],
+                    headers=t_headers,
+                    temperature=0.1
+                ).strip()
+
+                if not search_query:
+                    search_query = message.split("\n")[0].strip()
+
                 web_context, web_sources = comprehensive_web_search(
-                    message, time_filter=time_filter, return_sources=True
+                    search_query, time_filter=time_filter, return_sources=True
                 )
                 preface.append(untrusted_context_message("web search results", web_context))
             except Exception as e:
