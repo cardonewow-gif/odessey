@@ -282,7 +282,7 @@ class ChatProcessor:
             try:
                 from src.llm_core import llm_call
                 from src.task_endpoint import resolve_task_endpoint
-                
+
                 t_url, t_model, t_headers = session.endpoint_url, session.model, session.headers
                 try:
                     t_url, t_model, t_headers = resolve_task_endpoint(
