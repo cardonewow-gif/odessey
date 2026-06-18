@@ -13,9 +13,7 @@ def test_build_context_preface_web_search_query_generation(monkeypatch):
     mock_web_search = MagicMock(return_value=("Search Results Mock", [{"url": "http://mock.com"}]))
     monkeypatch.setattr("src.chat_processor.comprehensive_web_search", mock_web_search)
 
-    # Mock resolve_task_endpoint to avoid db calls
-    mock_resolve = MagicMock(return_value=("http://test.local", "test-model", {"Auth": "test"}))
-    monkeypatch.setattr("src.task_endpoint.resolve_task_endpoint", mock_resolve)
+
 
     processor = ChatProcessor(
         memory_manager=MagicMock(),
@@ -59,8 +57,7 @@ def test_build_context_preface_web_search_fallback_on_llm_failure(monkeypatch):
     mock_web_search = MagicMock(return_value=("Search Results Mock", []))
     monkeypatch.setattr("src.chat_processor.comprehensive_web_search", mock_web_search)
 
-    mock_resolve = MagicMock(return_value=("http://test.local", "test-model", {}))
-    monkeypatch.setattr("src.task_endpoint.resolve_task_endpoint", mock_resolve)
+
 
     processor = ChatProcessor(
         memory_manager=MagicMock(),
