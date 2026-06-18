@@ -3,13 +3,14 @@ import sys
 import os
 import types
 import importlib.util
+import pytest
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Importing core.database below runs init_db() at import time, and its default
 # (sqlite:///./data/app.db) can't be opened in a clean worktree because SQLite
-# won't create the missing ./data parent dir - pytest then dies during
+# won't create the ./data parent dir - pytest then dies during
 # collection, before any test module loads. Default to an in-memory DB for the
 # test session so collection is deterministic and writes no repo-local
 # artifacts. An explicit DATABASE_URL (a real test/CI database) is preserved.
@@ -34,7 +35,6 @@ def _has_module(mod_name: str) -> bool:
         return importlib.util.find_spec(mod_name) is not None
     except (ImportError, ValueError):
         return False
-
 
 # Stub optional dependencies only when they are not installed. Do not replace
 # real FastAPI/Starlette/Pydantic modules: route tests import their subpackages.
@@ -92,3 +92,24 @@ def pytest_collection_modifyitems(config, items):
         path = getattr(item, "path", None) or item.fspath
         for marker_name in markers_for_path(path):
             item.add_marker(getattr(pytest.mark, marker_name))
+
+@pytest.fixture
+def protected_context():
+    """Ensure security read-only/workspace context isolation between tests.
+
+    The RAG/classification changes added ContextVar-based guards
+    (src.security._turn_readonly, src.tool_execution._active_workspace) that
+    leak across tests unless explicitly reset. Tests that exercise tools
+    guarded by @requires_write_access / assert_not_readonly should depend on
+    this fixture.
+    """
+    from src.security import _turn_readonly, _turn_readonly_reason
+    from src.tool_execution import _active_workspace
+
+    ro_token = _turn_readonly.set(False)
+    reason_token = _turn_readonly_reason.set(None)
+    ws_token = _active_workspace.set(None)
+    yield
+    _turn_readonly.reset(ro_token)
+    _turn_readonly_reason.reset(reason_token)
+    _active_workspace.reset(ws_token)

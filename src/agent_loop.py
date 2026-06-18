@@ -707,20 +707,13 @@ def _extract_last_user_message(messages: List[Dict]) -> str:
 
 
 _LOW_SIGNAL_RE = re.compile(r"^[\W_]*$", re.UNICODE)
-_EXPLICIT_CONTINUATION_RE = re.compile(
-    r"^\s*(?:"
-    r"yes|y|yeah|yep|ok|okay|sure|do it|go ahead|continue|carry on|"
-    r"run it|launch it|start it|use that|that one|same|the same|"
-    r"first|second|third|the first one|the second one|the third one|"
-    r"[123]|[abc]"
-    r")\s*[.!?]*\s*$",
+
+# Matches vague exploration queries that should run with the full tool catalog
+# while still forcing readonly execution at the leaf level.
+_EXPLORATORY_TURN_RE = re.compile(
+    r"^\s*(?:look at|check|see|view|examine|what'?s|whats|whats up|what is|show me|tell me about)\b",
     re.IGNORECASE,
 )
-
-
-def _is_explicit_continuation(text: str) -> bool:
-    """Only these terse replies may inherit older user turns for tool retrieval."""
-    return bool(_EXPLICIT_CONTINUATION_RE.match(str(text or "").strip()))
 
 
 def _assistant_requested_followup(messages: List[Dict]) -> bool:
@@ -744,14 +737,8 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
         if isinstance(content, list):
             content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
         text = str(content or "").lower()
-        if "?" not in text:
-            return False
-        return bool(re.search(
-            r"\b(what would you like|what should|what do you want|which one|which model|"
-            r"what.+(?:todo|to-do|list|document|email|model|server|item)|"
-            r"any specific|give me|tell me)\b",
-            text,
-        ))
+        if "?" in text or "？" in text:
+            return True
     return False
 
 
@@ -759,23 +746,34 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     """Classify only whether this turn deserves domain tool retrieval.
 
     Normal chat should not inherit old Cookbook/email/document context. Recent
-    context is used only for explicit continuations ("yes", "do it", "1").
-    This function does not inject tools directly; selected tools later decide
-    which domain rule packs get appended to the system prompt.
+    context is used only for explicit continuations (e.g. short replies < 40 chars
+    to an assistant question, or if the assistant asked a question).
     """
     text = str(last_user or "").strip()
-    continuation = _is_explicit_continuation(text) or _assistant_requested_followup(messages)
+
+    # Check if there's a previous assistant turn - only then can a short reply
+    # be a continuation. First user message is never a continuation just because it's short.
+    has_prior_assistant = any(m.get("role") == "assistant" for m in messages[:-1])
+
+    is_short_reply = has_prior_assistant and len(text) < 40
+    continuation = is_short_reply or _assistant_requested_followup(messages)
     retrieval_query = _recent_context_for_retrieval(messages) if continuation else text
     q = retrieval_query.lower()
 
     if not text or bool(_LOW_SIGNAL_RE.match(text)):
         return {
             "low_signal": True,
+            "exploratory_turn": False,
             "continuation": False,
             "domains": set(),
             "retrieval_query": text,
         }
 
+    # Deterministic keyword/regex domain detection. This is a fallback layer
+    # underneath the semantic reverse-mapping done later in stream_agent_loop:
+    # it guarantees domain tool packs (e.g. contacts -> resolve_contact /
+    # manage_contact) are seeded even when the semantic RAG index misses,
+    # and keeps low_signal accurate for prompts that clearly target a domain.
     domains: Set[str] = set()
 
     def has(*patterns: str) -> bool:
@@ -816,16 +814,27 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     if has(r"\b(contact|contacts|phone|phone number|address book|vcard)\b"):
         domains.add("contacts")
 
-    low_signal = not continuation and not domains
+    # Vague exploration queries (no domain detected) trigger readonly execution
+    # but flow through normal tool retrieval so the model sees the full catalog.
+    if not continuation and not domains and bool(_EXPLORATORY_TURN_RE.match(text)):
+        return {
+            "low_signal": False,
+            "exploratory_turn": True,
+            "continuation": False,
+            "domains": set(),
+            "retrieval_query": text,
+        }
+
     return {
-        "low_signal": low_signal,
+        "low_signal": False,
+        "exploratory_turn": False,
         "continuation": continuation,
         "domains": domains,
         "retrieval_query": retrieval_query,
     }
 
 
-def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_chars: int = 600) -> str:
+def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3) -> str:
     """Build the tool-retrieval query from the last few USER turns, not just
     the latest one.
 
@@ -835,6 +844,11 @@ def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_c
     manage_calendar and improvises with bash/app_api. Concatenating the recent
     user turns lets the follow-up inherit the topic so just-used tools stay
     surfaced. Newest-first, so the latest turn survives the length cap."""
+    from src.settings import get_setting
+    from src.context_compactor import _truncate_text_to_token_budget
+
+    max_tokens = get_setting("rag_context_max_tokens", 511)
+
     collected = []
     for msg in reversed(messages):
         if msg.get("role") != "user":
@@ -852,7 +866,14 @@ def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_c
         collected.append(content)
         if len(collected) >= max_user:
             break
-    return "\n".join(collected)[:max_chars]
+
+    full_text = "\n".join(collected)
+
+    # We use the mathematical upper bound for chars from the token budget
+    # (_truncate_text_to_token_budget does it this way, but leaves a notice block).
+    # Here we just truncate purely to avoid sending notices to the VectorDB.
+    max_chars = max(200, int(max_tokens / 0.3))
+    return full_text[:max_chars]
 
 def _build_system_prompt(
     messages: List[Dict],
@@ -1870,6 +1891,10 @@ async def stream_agent_loop(
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
     _intent = _classify_agent_request(messages, _last_user)
+    turn_readonly = bool(plan_mode or _intent.get("exploratory_turn"))
+    turn_readonly_reason = (
+        "plan_mode" if plan_mode else ("exploratory_turn" if _intent.get("exploratory_turn") else None)
+    )
     # Tool retrieval uses the latest message by default. It may inherit recent
     # user turns only for explicit continuations ("yes", "do it", "1").
     _retrieval_query = str(_intent.get("retrieval_query") or _last_user)
@@ -1958,16 +1983,24 @@ async def stream_agent_loop(
                 _relevant_tools.update(tools)
         logger.info(f"[tool-rag] Keyword fallback selected: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
 
-    # If deterministic domain detection fired, seed the corresponding domain
-    # tools into the selected tool set. This is not direct prompt-pack
-    # injection: `_assemble_prompt()` still derives domain rules from the final
-    # tool names. It prevents obvious requests like "last 5 emails" from
-    # collapsing to only ask_user/manage_memory when vector retrieval misses or
-    # times out.
-    if not guide_only and _relevant_tools is not None:
-        for _domain in (_intent.get("domains") or set()):
+    # Reverse-Map: If the retrieved tools belong to a domain, activate that domain
+    # and seed the corresponding domain tools into the selected tool set.
+    # This ensures "domain packs" work via semantic RAG instead of English regexes.
+    # Skip this expansion in low_signal mode to preserve the restricted tool set.
+    if not guide_only and _relevant_tools is not None and not bool(_intent.get("low_signal")):
+        active_domains = set(_intent.get("domains") or [])
+
+        # 1. Reverse-map retrieved tools to their domains
+        for tool in list(_relevant_tools):
+            for domain, domain_tools in _DOMAIN_TOOL_MAP.items():
+                if tool in domain_tools:
+                    active_domains.add(domain)
+
+        # 2. Inject the full tool packs for the activated domains
+        for _domain in active_domains:
             _relevant_tools.update(_DOMAIN_TOOL_MAP.get(str(_domain), set()))
-        if "cookbook" in (_intent.get("domains") or set()):
+
+        if "cookbook" in active_domains:
             _relevant_tools.update({
                 "list_served_models",
                 "list_downloads",
@@ -1975,9 +2008,9 @@ async def stream_agent_loop(
                 "list_cookbook_servers",
                 "list_serve_presets",
             })
-        if "email" in (_intent.get("domains") or set()):
+        if "email" in active_domains:
             _relevant_tools.add("ui_control")
-        if "web" in (_intent.get("domains") or set()):
+        if "web" in active_domains:
             _relevant_tools.update({"web_search", "web_fetch"})
         if "ui" in (_intent.get("domains") or set()):
             _relevant_tools.add("ui_control")
@@ -2819,6 +2852,8 @@ async def stream_agent_loop(
                             owner=owner,
                             progress_cb=_push_progress,
                             workspace=workspace,
+                            turn_readonly=turn_readonly,
+                            turn_readonly_reason=turn_readonly_reason,
                         )
                     finally:
                         # Sentinel so the drainer knows to stop.
