@@ -282,21 +282,34 @@ class ChatProcessor:
             try:
                 from src.llm_core import llm_call
                 from src.task_endpoint import resolve_task_endpoint
-                t_url, t_model, t_headers = resolve_task_endpoint(owner=owner)
-                if not t_model:
-                    t_url, t_model, t_headers = session.endpoint_url, session.model, session.headers
+                
+                t_url, t_model, t_headers = resolve_task_endpoint(
+                    fallback_url=session.endpoint_url,
+                    fallback_model=session.model,
+                    fallback_headers=session.headers,
+                    owner=owner
+                )
 
-                search_query = llm_call(
-                    t_url,
-                    t_model,
-                    [{"role": "system", "content": "Extract a concise search query from the user's message. Reply ONLY with the query."}, 
-                     {"role": "user", "content": message}],
-                    headers=t_headers,
-                    temperature=0.1
-                ).strip()
+                search_query = message.split("\n")[0].strip()
 
-                if not search_query:
-                    search_query = message.split("\n")[0].strip()
+                try:
+                    generated_query = llm_call(
+                        t_url,
+                        t_model,
+                        [{"role": "system", "content": "Extract a concise search query from the user's message. Reply ONLY with the query."}, 
+                         {"role": "user", "content": message}],
+                        headers=t_headers,
+                        temperature=0.1
+                    ).strip()
+                    
+                    if generated_query:
+                        search_query = generated_query
+                except Exception as e:
+                    logger.warning(f"Failed to generate search query via LLM, using fallback: {e}")
+
+                search_query = " ".join(search_query.split())
+                if len(search_query) > 150:
+                    search_query = search_query[:150].strip()
 
                 web_context, web_sources = comprehensive_web_search(
                     search_query, time_filter=time_filter, return_sources=True
