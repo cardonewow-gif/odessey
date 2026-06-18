@@ -102,3 +102,7 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+config/davmail/
+config/radicale/
+config/vdirsyncer/
+*.bak
