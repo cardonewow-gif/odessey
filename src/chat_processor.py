@@ -283,12 +283,16 @@ class ChatProcessor:
                 from src.llm_core import llm_call
                 from src.task_endpoint import resolve_task_endpoint
                 
-                t_url, t_model, t_headers = resolve_task_endpoint(
-                    fallback_url=session.endpoint_url,
-                    fallback_model=session.model,
-                    fallback_headers=session.headers,
-                    owner=owner
-                )
+                t_url, t_model, t_headers = session.endpoint_url, session.model, session.headers
+                try:
+                    t_url, t_model, t_headers = resolve_task_endpoint(
+                        fallback_url=session.endpoint_url,
+                        fallback_model=session.model,
+                        fallback_headers=session.headers,
+                        owner=owner
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to resolve task endpoint; using session fallback: {e}")
 
                 search_query = message.split("\n")[0].strip()
 
