@@ -294,7 +294,7 @@ class ChatProcessor:
                 except Exception as e:
                     logger.warning(f"Failed to resolve task endpoint; using session fallback: {e}")
 
-                search_query = message.split("\n")[0].strip()
+                search_query = next((line.strip() for line in message.split("\n") if line.strip()), "")
 
                 try:
                     generated_query = llm_call(
@@ -303,7 +303,9 @@ class ChatProcessor:
                         [{"role": "system", "content": "Extract a concise search query from the user's message. Reply ONLY with the query."}, 
                          {"role": "user", "content": message}],
                         headers=t_headers,
-                        temperature=0.1
+                        temperature=0.1,
+                        max_tokens=50,
+                        timeout=15
                     ).strip()
                     
                     if generated_query:
@@ -315,10 +317,11 @@ class ChatProcessor:
                 if len(search_query) > 150:
                     search_query = search_query[:150].strip()
 
-                web_context, web_sources = comprehensive_web_search(
-                    search_query, time_filter=time_filter, return_sources=True
-                )
-                preface.append(untrusted_context_message("web search results", web_context))
+                if search_query:
+                    web_context, web_sources = comprehensive_web_search(
+                        search_query, time_filter=time_filter, return_sources=True
+                    )
+                    preface.append(untrusted_context_message("web search results", web_context))
             except Exception as e:
                 logger.error(f"Web search failed: {e}")
                 preface.append({"role": "system", "content": "Web search encountered an error and could not retrieve results."})
