@@ -300,8 +300,16 @@ class ChatProcessor:
                     generated_query = llm_call(
                         t_url,
                         t_model,
-                        [{"role": "system", "content": "Extract a concise search query from the user's message. Reply ONLY with the query."}, 
-                         {"role": "user", "content": message}],
+                        [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Extract a concise search query from the user's message. "
+                                    "Reply ONLY with the query."
+                                ),
+                            },
+                            {"role": "user", "content": message},
+                        ],
                         headers=t_headers,
                         temperature=0.1,
                         max_tokens=50,

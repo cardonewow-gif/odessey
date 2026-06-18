@@ -318,7 +318,7 @@ uv pip sync requirements.lock                          # reproduce it exactly la
 ### Outlook / Office 365 email
 Odysseus email accounts currently use IMAP/SMTP username-password auth. Outlook
 and Microsoft 365 generally require OAuth instead, so normal Microsoft mailbox
-passwords will fail. See [docs/email-outlook.md](email-outlook.md) for the
+passwords will fail. See [email-outlook.md](email-outlook.md) for the
 current limitation and the planned integration direction.
 
 ## Security Notes
