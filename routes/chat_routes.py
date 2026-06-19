@@ -1300,6 +1300,8 @@ def setup_chat_routes(
                                     "doc_stream_open", "doc_stream_delta",
                                     "doc_update", "doc_suggestions", "ui_control",
                                     "rounds_exhausted",
+                                    "loop_breaker_triggered",
+                                    "intent_nudge_exhausted",
                                     "ask_user",
                                     "plan_update",
                                 ):

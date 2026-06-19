@@ -1911,6 +1911,23 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   _chatBox.appendChild(note);
                   try { note.scrollIntoView({ block: 'end', behavior: 'smooth' }); } catch (_) { uiModule.scrollHistory && uiModule.scrollHistory(); }
                 }
+              } else if (json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted') {
+                // A loop guard ended the turn — surface why so it isn't mistaken
+                // for a clean completion or a silent stall.
+                const _chatBox = document.getElementById('chat-history');
+                if (!_isBg && _chatBox) {
+                  const note = document.createElement('div');
+                  note.className = 'stopped-indicator loop-guard-stop';
+                  const label = document.createElement('span');
+                  label.className = 'rounds-exhausted-label';
+                  label.textContent = json.message ||
+                    (json.type === 'loop_breaker_triggered'
+                      ? 'Stopped by the loop-breaker (no new progress).'
+                      : 'Stopped: announced an action but never called the tool.');
+                  note.appendChild(label);
+                  _chatBox.appendChild(note);
+                  try { note.scrollIntoView({ block: 'end', behavior: 'smooth' }); } catch (_) { uiModule.scrollHistory && uiModule.scrollHistory(); }
+                }
               } else if (json.type === 'model_actual') {
                 if (!_isBg && holder) {
                   holder._requestedModel = json.requested_model || holder._requestedModel || modelName;

@@ -38,6 +38,167 @@ from src.agent_tools import (
 
 logger = logging.getLogger(__name__)
 
+# Redaction patterns for common secret-bearing shapes. Explicit and tested
+# (see tests/test_loop_guard_signals.py) rather than one clever broad regex —
+# safety first, but we try not to mangle harmless prose. Applied in order.
+_REDACTED = "[redacted]"
+
+# Cookie: ... / Set-Cookie: ... — redact the rest of the line (cookies hold spaces).
+_SENSITIVE_COOKIE_RE = re.compile(
+    r"(?i)\b((?:set-)?cookie\s*[:=]\s*)[^\r\n]+"
+)
+# URL credentials, e.g. postgres://user:pass@host/db. The password half allows
+# inner colons (postgres://user:pa:ss@host/db) but still stops at / and @.
+_SENSITIVE_URL_CRED_RE = re.compile(
+    r"(?i)\b([a-z][a-z0-9+.\-]*://)[^\s:/@]+:[^\s/@]+@"
+)
+# Prefix-only discovery regexes. Each matches the key and its separator (the part
+# we KEEP); the value that follows is found by a linear scanner rather than by a
+# regex, so there is no backtracking-prone quantifier over uncontrolled input.
+#
+# Authorization: Bearer <tok> / Authorization: Basic "two word secret"
+_AUTH_PREFIX_RE = re.compile(
+    r"(?i)authorization\s*[:=]\s*(?:bearer|basic)\s+"
+)
+# Provider-prefixed env names, e.g. OPENAI_API_KEY=..., AWS_SECRET_ACCESS_KEY=...,
+# GITHUB_TOKEN=... — require a sensitive suffix preceded by `_` so benign names
+# that merely end in KEY (MONKEY, TURKEY) are left alone.
+_ENV_PREFIX_RE = re.compile(
+    r"(?:export\s+)?\b[A-Z][A-Z0-9_]*"
+    r"_(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?)\s*=\s*"
+)
+# Generic sensitive key, e.g. password=..., api_key: ..., client_secret=...
+_KEY_PREFIX_RE = re.compile(
+    r"(?i)\b(?:password|passwd|pwd|token|api[_-]?key|client_secret|secret)\b\s*[:=]\s*"
+)
+# Obvious provider-shaped bare tokens (no surrounding key needed).
+_SENSITIVE_BARE_TOKEN_RE = re.compile(
+    r"\b("
+    r"sk-[A-Za-z0-9_\-]{16,}"          # OpenAI / Anthropic style
+    r"|gh[pousr]_[A-Za-z0-9]{20,}"     # GitHub PAT
+    r"|xox[baprs]-[A-Za-z0-9\-]{10,}"  # Slack
+    r"|AKIA[0-9A-Z]{16}"               # AWS access key id
+    r"|hf_[A-Za-z0-9]{16,}"            # Hugging Face token
+    r"|AIza[0-9A-Za-z_\-]{20,}"        # Google API key
+    r")\b"
+)
+
+
+def _consume_secret_value_end(text: str, start: int) -> int:
+    """Return the exclusive end index of the secret value beginning at ``start``.
+
+    If the value is quoted, scan to the matching unescaped quote (backslash
+    escapes are skipped two chars at a time). Otherwise scan to the first
+    whitespace, comma, or semicolon. The scan is linear in the length of the
+    input, so it cannot exhibit catastrophic backtracking.
+    """
+    n = len(text)
+    if start >= n:
+        return start
+    quote = text[start]
+    if quote in ("'", '"'):
+        i = start + 1
+        while i < n:
+            ch = text[i]
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                return i + 1
+            i += 1
+        return n  # unterminated quote: redact to the end
+    i = start
+    while i < n and not text[i].isspace() and text[i] not in (",", ";"):
+        i += 1
+    return i
+
+
+def _redact_after_prefix(text: str, prefix_re: "re.Pattern") -> str:
+    """Redact the value following each ``prefix_re`` match using a linear scan."""
+    result = []
+    pos = 0
+    n = len(text)
+    while pos < n:
+        match = prefix_re.search(text, pos)
+        if match is None:
+            result.append(text[pos:])
+            break
+        result.append(text[pos:match.end()])
+        value_end = _consume_secret_value_end(text, match.end())
+        if value_end > match.end():
+            result.append(_REDACTED)
+            pos = value_end
+        else:
+            # Empty value: nothing to redact; step past the prefix and continue.
+            pos = match.end()
+            if pos < n:
+                result.append(text[pos])
+                pos += 1
+    return "".join(result)
+
+
+def _redact_private_keys(text: str) -> str:
+    """Replace PEM private-key blocks with a placeholder via linear scanning.
+
+    Finds ``-----BEGIN `` markers, verifies the header names a PRIVATE KEY,
+    locates the matching ``-----END `` marker, and collapses the whole block.
+    No regex is used, so the (multi-line, uncontrolled) body cannot trigger
+    polynomial matching.
+    """
+    begin_marker = "-----BEGIN "
+    end_marker = "-----END "
+    dash = "-----"
+    max_header = 64  # generous bound on "[TYPE ]PRIVATE KEY"
+    result = []
+    pos = 0
+    while True:
+        begin = text.find(begin_marker, pos)
+        if begin == -1:
+            result.append(text[pos:])
+            return "".join(result)
+        header_start = begin + len(begin_marker)
+        header_close = text.find(dash, header_start)
+        if (
+            header_close == -1
+            or header_close - header_start > max_header
+            or not text[header_start:header_close].endswith("PRIVATE KEY")
+        ):
+            result.append(text[pos:header_start])
+            pos = header_start
+            continue
+        end = text.find(end_marker, header_close)
+        if end == -1:
+            result.append(text[pos:])
+            return "".join(result)
+        end_header_start = end + len(end_marker)
+        end_close = text.find(dash, end_header_start)
+        if (
+            end_close == -1
+            or end_close - end_header_start > max_header
+            or not text[end_header_start:end_close].endswith("PRIVATE KEY")
+        ):
+            result.append(text[pos:header_start])
+            pos = header_start
+            continue
+        result.append(text[pos:begin])
+        result.append("[redacted private key]")
+        pos = end_close + len(dash)
+
+
+def _redact_sensitive_text(value: object) -> str:
+    """Redact obvious credential values before surfacing tool output."""
+    if value is None:
+        return ""
+
+    text = str(value)
+    text = _redact_private_keys(text)
+    text = _redact_after_prefix(text, _AUTH_PREFIX_RE)
+    text = _SENSITIVE_COOKIE_RE.sub(r"\1" + _REDACTED, text)
+    text = _SENSITIVE_URL_CRED_RE.sub(r"\1" + _REDACTED + "@", text)
+    text = _redact_after_prefix(text, _ENV_PREFIX_RE)
+    text = _redact_after_prefix(text, _KEY_PREFIX_RE)
+    return _SENSITIVE_BARE_TOKEN_RE.sub(_REDACTED, text)
+
 
 def _load_mcp_disabled_map() -> Dict[str, set]:
     """Load per-server disabled tool sets from the database."""
@@ -2244,6 +2405,7 @@ async def stream_agent_loop(
     # signatures + consecutive no-text tool rounds to bail early.
     _recent_call_sigs = collections.deque(maxlen=6)
     _stuck_rounds = 0
+    _MAX_STUCK_ROUNDS = 4  # consecutive no-progress rounds before loop-breaker bails
     # Frequency of each exact call signature (tool + args), for the runaway
     # backstop. Counting identical repeats — not distinct same-tool calls —
     # lets a legit batch (e.g. 18 calendar events at once) through.
@@ -2666,17 +2828,22 @@ async def stream_agent_loop(
             # promise: short response (<400 chars), no fenced code/answer,
             # and an action-intent phrase was matched. Long answers that
             # happen to contain "let me know" are not stalls.
-            _looks_like_promise = (
+            _promise_shape = (
                 not guide_only
                 and _intent_match is not None
                 and len(_intent_text) < 400
                 and "```" not in _intent_text
-                and _intent_nudge_count < _MAX_INTENT_NUDGES
             )
+            _looks_like_promise = _promise_shape and _intent_nudge_count < _MAX_INTENT_NUDGES
             if _looks_like_promise:
                 _intent_nudge_count += 1
                 _matched_phrase = _intent_match.group(0).strip()
-                logger.info(f"[agent] intent-without-action nudge #{_intent_nudge_count} on round {round_num}: {_matched_phrase!r}")
+                # Don't log the matched phrase — it's raw model text that may
+                # carry credentials. Structural metadata only.
+                logger.info(
+                    "[agent] intent-without-action nudge #%d on round %d",
+                    _intent_nudge_count, round_num,
+                )
                 messages.append({
                     "role": "system",
                     "content": (
@@ -2692,6 +2859,24 @@ async def stream_agent_loop(
                 # Visible signal in the stream so the user knows we caught it.
                 yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
                 continue
+            # The model keeps announcing actions it never takes and we've spent
+            # every nudge — surface why the turn is ending instead of letting it
+            # look like a clean completion.
+            if _promise_shape and _intent_nudge_count >= _MAX_INTENT_NUDGES:
+                _matched_phrase = _intent_match.group(0).strip()
+                _matched_phrase_safe = _redact_sensitive_text(_matched_phrase)
+                _in_message = (
+                    f"Intent-nudge cap reached on round {round_num}: the model "
+                    f"announced an action ({_matched_phrase_safe!r}) without a tool call "
+                    f"after {_intent_nudge_count} nudge(s); ending the turn."
+                )
+                # Do not log the matched phrase, even redacted. It is raw model
+                # text and may contain credentials; keep logs structural only.
+                logger.warning(
+                    "[agent] intent-nudge cap exhausted on round %d (%d/%d)",
+                    round_num, _intent_nudge_count, _MAX_INTENT_NUDGES,
+                )
+                yield f'data: {json.dumps({"type": "intent_nudge_exhausted", "round": round_num, "nudges": _intent_nudge_count, "max_nudges": _MAX_INTENT_NUDGES, "message": _in_message})}\n\n'
             break  # no tools — done
 
         # ── Loop-breaker (Terminus-style stall detector) ──────────────
@@ -2724,10 +2909,23 @@ async def stream_agent_loop(
         # Distinct calls to one tool (a real batch) are legitimate work, so we
         # count identical call signatures, not raw per-tool-type totals.
         _runaway = _detect_runaway_call(_call_freq)
-        if _stuck_rounds >= 4 or _runaway:
+        if _stuck_rounds >= _MAX_STUCK_ROUNDS or _runaway:
             reason = (f"calling {_runaway} with identical arguments over and over" if _runaway
                       else "repeating the same tool calls without new progress")
-            logger.warning(f"[agent] loop-breaker tripped on round {round_num} ({reason}); sig={_sig[:80]!r}")
+            _lb_message = (
+                f"Loop-breaker stopped the agent on round {round_num}: {reason}. "
+                "Forced one tool-free round to converge on an answer or state what's blocked."
+            )
+            # Log structural metadata only — `_sig` is raw tool-call content
+            # that may carry credentials.
+            logger.warning(
+                "[agent] loop-breaker tripped on round %d (%s); "
+                "stuck_rounds=%d/%d runaway=%r",
+                round_num, reason, _stuck_rounds, _MAX_STUCK_ROUNDS, _runaway,
+            )
+            # Surface the stop cause to the stream so the user (and journalctl)
+            # can tell a guard fired, not a clean completion.
+            yield f'data: {json.dumps({"type": "loop_breaker_triggered", "round": round_num, "reason": reason, "stuck_rounds": _stuck_rounds, "max_stuck_rounds": _MAX_STUCK_ROUNDS, "runaway": _runaway, "message": _lb_message})}\n\n'
             # The model has been executing tools, so its results are already
             # in context. Force ONE tool-free round to converge: write the
             # answer from what it has, or state plainly what's blocking it.
@@ -2806,6 +3004,10 @@ async def stream_agent_loop(
                 cmd_display = block.content.split("\n")[0].strip()[:80]
             else:
                 cmd_display = block.content.strip()
+            # The display string is streamed (tool_start/tool_output) and persisted;
+            # redact any secrets in it. block.content itself is left untouched so
+            # tool execution still sees the real command.
+            cmd_display = _redact_sensitive_text(cmd_display)
 
             if tool_policy and tool_policy.blocks(block.tool_type):
                 desc = f"{block.tool_type}: BLOCKED"
@@ -2851,8 +3053,15 @@ async def stream_agent_loop(
                     evt = await _progress_q.get()
                     if evt is None:
                         break
+                    # Redact secrets in the live tail before streaming — the
+                    # final tool_output is redacted, so the progress tail must
+                    # be too, or a secret could flash by mid-run. Copy so we
+                    # don't mutate the tool's own event payload.
+                    _evt = dict(evt)
+                    if isinstance(_evt.get("tail"), str):
+                        _evt["tail"] = _redact_sensitive_text(_evt["tail"])
                     yield (
-                        f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})}\n\n'
+                        f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **_evt})}\n\n'
                     )
                 desc, result = await _tool_task
 
@@ -2918,7 +3127,7 @@ async def stream_agent_loop(
                                 result["results"] = _clean
                             elif "stdout" in result:
                                 result["stdout"] = _clean
-                        except (json.JSONDecodeError, Exception):
+                        except Exception:
                             pass
 
             # Emit doc-specific event for document tools — the frontend
@@ -2987,29 +3196,29 @@ async def stream_agent_loop(
                 # empty) stdout/stderr; fall back to the error so the "timed
                 # out" reason reaches the UI instead of a blank result.
                 raw = result["stdout"] or result["stderr"] or result.get("error", "")
-                output_text = _truncate(raw)
+                output_text = _truncate(_redact_sensitive_text(raw))
             elif "output" in result:
                 # bash / python canonical result: {"output": ..., "exit_code": ...}
                 raw = result["output"] or ""
-                output_text = _truncate(raw)
+                output_text = _truncate(_redact_sensitive_text(raw))
             elif "response" in result:
                 # AI interaction tools (chat_with_model, send_to_session)
                 label = result.get("model", result.get("session_name", "AI"))
-                output_text = _truncate(f"{label}: {result['response']}")
+                output_text = _truncate(_redact_sensitive_text(f"{label}: {result['response']}"))
             elif "content" in result:
-                output_text = _truncate(result["content"])
+                output_text = _truncate(_redact_sensitive_text(result["content"]))
             elif "results" in result:
-                output_text = _truncate(result["results"])
+                output_text = _truncate(_redact_sensitive_text(result["results"]))
             elif "session_id" in result and "name" in result:
                 output_text = f"Session created: {result['name']} (id: {result['session_id']})"
             elif "success" in result:
                 output_text = (
                     f"Written: {result.get('path', '')}"
                     if result["success"]
-                    else f"Error: {result.get('error', '')}"
+                    else f"Error: {_redact_sensitive_text(result.get('error', ''))}"
                 )
             elif "error" in result:
-                output_text = _truncate(result["error"])
+                output_text = _truncate(_redact_sensitive_text(result["error"]))
 
             # Emit tool_output (include ui_event data if present)
             tool_output_data = {"type": "tool_output", "tool": block.tool_type, "command": cmd_display, "output": output_text, "exit_code": result.get("exit_code")}
