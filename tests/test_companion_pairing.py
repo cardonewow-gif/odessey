@@ -55,6 +55,7 @@ _db.ApiToken = _ApiToken
 
 @pytest.fixture(autouse=True)
 def _companion_pairing_stubs(monkeypatch):
+    monkeypatch.delenv("COMPANION_BASE_URL", raising=False)
     monkeypatch.setitem(sys.modules, "core.database", _db)
     for _name, _attrs in {
         "core.auth": {"AuthManager": MagicMock()},
@@ -91,7 +92,7 @@ def test_mint_token_returns_raw_once_and_stores_only_a_hash(monkeypatch):
     assert _CAPTURED["token_hash"].startswith("$2")  # bcrypt
     assert _CAPTURED["token_prefix"] == raw[:8]
     assert _CAPTURED["owner"] == "alice"
-    assert _CAPTURED["scopes"] == "chat"
+    assert _CAPTURED["scopes"] == "chat,remote_development"
     assert _CAPTURED["is_active"] is True
 
 
@@ -114,6 +115,39 @@ def test_mint_pairing_token_tolerates_no_invalidator(monkeypatch):
 def test_pairing_payload_shape():
     p = P.pairing_payload("192.168.1.9", 7000, "ody_x")
     assert p == {"v": 1, "host": "192.168.1.9", "port": 7000, "token": "ody_x"}
+    remote = P.pairing_payload(
+        "192.168.1.9",
+        7000,
+        "ody_x",
+        base_url="https://odysseus.example.ts.net",
+    )
+    assert remote == {
+        "v": 1,
+        "host": "192.168.1.9",
+        "port": 7000,
+        "token": "ody_x",
+        "base_url": "https://odysseus.example.ts.net",
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://odysseus.example.ts.net", "https://odysseus.example.ts.net"),
+        ("https://odysseus.example.ts.net/", "https://odysseus.example.ts.net"),
+        ("http://100.64.0.10:7000", "http://100.64.0.10:7000"),
+        ("", None),
+        ("javascript:alert(1)", None),
+        ("https://user:pass@example.test", None),
+        ("https://example.test/path", None),
+        ("https://example.test?token=x", None),
+        ("https://example.test#frag", None),
+        ("https://example.test:bad", None),
+        ("https://exa mple.test", None),
+    ],
+)
+def test_configured_base_url_accepts_private_origins_only(value, expected):
+    assert P.configured_base_url(value) == expected
 
 
 @pytest.mark.parametrize("payload", ["[]", '{"users": []}'])
@@ -250,9 +284,32 @@ def test_pair_post_json_returns_pairing_payload(monkeypatch):
         "port": 7000,
         "token": "ody_raw",
     }
+    assert "base_url" not in response
+    assert "base_url" not in response["payload"]
     for secret_key in ("token_hash", "token_prefix", "scopes", "is_active", "owner", "name"):
         assert secret_key not in response
         assert secret_key not in response["payload"]
+
+
+def test_pair_post_json_uses_configured_private_base_url(monkeypatch):
+    mint = MagicMock(return_value=("tok123", "ody_raw"))
+    monkeypatch.setenv("COMPANION_BASE_URL", "https://odysseus.example.ts.net/")
+    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "get_current_user", lambda request: "alice")
+    monkeypatch.setattr(R, "mint_pairing_token", mint)
+    monkeypatch.setattr(R._pairing, "lan_ip_candidates", lambda: ["192.168.1.50"])
+
+    request = _fake_pair_request(format="json", port=7000)
+    response = _pair_route("POST")(request)
+
+    assert response["base_url"] == "https://odysseus.example.ts.net"
+    assert response["payload"] == {
+        "v": 1,
+        "host": "192.168.1.50",
+        "port": 7000,
+        "token": "ody_raw",
+        "base_url": "https://odysseus.example.ts.net",
+    }
 
 
 def test_pair_post_json_qr_failure_returns_null_qr(monkeypatch):
@@ -293,3 +350,21 @@ def test_pair_post_html_escapes_pairing_values(monkeypatch):
     assert "host&lt;one&gt;&amp;" in body
     assert "ody_&lt;raw&gt;&amp;" in body
     assert "tok&lt;123&gt;" in body
+
+
+def test_pair_post_html_includes_configured_private_base_url(monkeypatch):
+    monkeypatch.setenv("COMPANION_BASE_URL", "https://odysseus.example.ts.net/")
+    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "get_current_user", lambda request: "alice")
+    monkeypatch.setattr(R, "mint_pairing_token", lambda owner, invalidate: ("tok123", "ody_raw"))
+    monkeypatch.setattr(R._pairing, "lan_ip_candidates", lambda: ["192.168.1.50"])
+    monkeypatch.setattr(R._pairing, "pairing_qr_png_data_uri", lambda payload: None)
+
+    response = _pair_route("POST")(_fake_pair_request())
+    body = response.body.decode()
+
+    assert response.media_type == "text/html"
+    assert "Base URL:" in body
+    assert "https://odysseus.example.ts.net" in body
+    assert "configured private Base URL" in body
+    assert "same network" not in body

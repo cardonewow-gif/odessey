@@ -19,17 +19,31 @@ from fastapi import HTTPException
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # core.database instantiates SQLAlchemy declarative classes at import time, which
-# blows up under conftest's sqlalchemy MagicMock stubs. companion.routes only
-# imports it lazily inside the /models handler, but stub it defensively so the
-# import is robust regardless of collection order.
+# blows up under conftest's sqlalchemy MagicMock stubs. companion.routes imports
+# core.middleware, which imports core/__init__ and can ask for extra ORM names
+# during collection, so expose a resilient stub and pin only the model pieces
+# this file asserts on.
 if "core.database" not in sys.modules:
-    _db = types.ModuleType("core.database")
+    class _DBStub(types.ModuleType):
+        def __getattr__(self, name):  # noqa: D401
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return MagicMock()
+
+    _db = _DBStub("core.database")
     _db.SessionLocal = MagicMock()
     _db.ModelEndpoint = MagicMock()
     sys.modules["core.database"] = _db
 
 import companion.routes as companion_routes
-from companion.routes import setup_companion_routes, token_owner, owner_can_see
+from companion.routes import (
+    companion_manifest,
+    COMPANION_CONTRACT_VERSION,
+    owner_can_see,
+    require_companion_scope,
+    setup_companion_routes,
+    token_owner,
+)
 
 
 def _request(**state):
@@ -125,6 +139,13 @@ def _models_route():
     raise AssertionError("GET /api/companion/models route not found")
 
 
+def _route(path):
+    for route in setup_companion_routes().routes:
+        if getattr(route, "path", "") == path and "GET" in getattr(route, "methods", set()):
+            return route.endpoint
+    raise AssertionError(f"GET {path} route not found")
+
+
 def _call_models_route(monkeypatch, rows, request):
     db = _DB(rows)
     db_mod = sys.modules["core.database"]
@@ -152,6 +173,273 @@ def _endpoint_names(endpoints):
 
 
 # --- token_owner: who a request is attributed to ---------------------------
+
+def test_companion_scope_allows_cookie_sessions():
+    # Cookie sessions are already app-authenticated; only bearer tokens need
+    # integration-scope checks here.
+    req = _request(api_token=False, current_user="alice")
+    require_companion_scope(req)
+
+
+def test_companion_scope_allows_chat_scoped_bearer_token():
+    req = _request(api_token=True, api_token_scopes=["chat"], current_user="api")
+    require_companion_scope(req)
+
+
+def test_companion_scope_rejects_non_chat_bearer_token():
+    req = _request(
+        api_token=True,
+        api_token_scopes=["todos:read", "documents:read"],
+        current_user="api",
+    )
+    with pytest.raises(HTTPException) as exc:
+        require_companion_scope(req)
+
+    assert exc.value.status_code == 403
+    assert "chat" in exc.value.detail
+
+
+def test_companion_scope_rejects_unscoped_bearer_token():
+    req = _request(api_token=True, current_user="api")
+    with pytest.raises(HTTPException) as exc:
+        require_companion_scope(req)
+
+    assert exc.value.status_code == 403
+    assert "chat" in exc.value.detail
+
+
+def test_ping_route_requires_chat_scope_for_bearer_token():
+    req = _request(api_token=True, api_token_scopes=["email:read"], current_user="api")
+
+    with pytest.raises(HTTPException) as exc:
+        _route("/api/companion/ping")(req)
+
+    assert exc.value.status_code == 403
+
+
+def test_info_route_requires_chat_scope_for_bearer_token():
+    req = _request(api_token=True, api_token_scopes=["documents:read"], current_user="api")
+
+    with pytest.raises(HTTPException) as exc:
+        _route("/api/companion/info")(req)
+
+    assert exc.value.status_code == 403
+
+
+def test_info_route_advertises_manifest_contract(monkeypatch):
+    monkeypatch.setattr(companion_routes, "get_current_user", lambda request: "alice")
+    req = _request(api_token=False, current_user="alice")
+
+    response = _route("/api/companion/info")(req)
+
+    assert response["owner"] == "alice"
+    assert response["client_contract"] == {
+        "version": COMPANION_CONTRACT_VERSION,
+        "manifest": "/api/companion/manifest",
+    }
+
+
+def test_companion_manifest_describes_private_mobile_contract(monkeypatch):
+    import companion.commands as companion_commands
+
+    monkeypatch.setattr(companion_routes, "get_current_user", lambda request: "api")
+    monkeypatch.setattr(
+        companion_commands,
+        "companion_workspace_roots",
+        lambda: ["/workspace/alpha", "/workspace/beta"],
+    )
+    req = _request(
+        api_token=True,
+        api_token_owner="alice",
+        api_token_scopes=["chat"],
+        current_user="api",
+    )
+
+    response = companion_manifest(req)
+
+    assert response["name"] == "odysseus"
+    assert response["contract_version"] == COMPANION_CONTRACT_VERSION
+    assert response["owner"] == "alice"
+    assert response["auth"]["mode"] == "token"
+    assert response["auth"]["required_bearer_scope"] == "chat"
+    assert response["auth"]["required_command_scope"] == "remote_development"
+    assert response["auth"]["token_scopes"] == ["chat"]
+    assert response["auth"]["pairing"] == {
+        "method": "admin_cookie_post",
+        "path": "/api/companion/pair",
+        "payload_version": 1,
+        "scopes": ["chat", "remote_development"],
+    }
+    assert response["transport"]["private_network_required"] is True
+    assert response["transport"]["public_internet_supported"] is False
+    assert response["transport"]["base_url"] is None
+    assert "wireguard" in response["transport"]["recommended"]
+    assert response["endpoints"]["manifest"] == {
+        "method": "GET",
+        "path": "/api/companion/manifest",
+    }
+    assert response["endpoints"]["commands"] == {
+        "method": "POST",
+        "path": "/api/companion/commands",
+    }
+    assert response["endpoints"]["sessions"] == {
+        "method": "GET",
+        "path": "/api/companion/sessions",
+    }
+    assert response["endpoints"]["create_session"] == {
+        "method": "POST",
+        "path": "/api/companion/sessions",
+    }
+    assert response["endpoints"]["chat_stream"] == {
+        "method": "POST",
+        "path": "/api/chat_stream",
+    }
+    assert response["endpoints"]["chat_resume"] == {
+        "method": "GET",
+        "path": "/api/chat/resume/{session_id}",
+    }
+    assert response["endpoints"]["chat_stop"] == {
+        "method": "POST",
+        "path": "/api/chat/stop/{session_id}",
+    }
+    assert response["endpoints"]["chat_stream_status"] == {
+        "method": "GET",
+        "path": "/api/chat/stream_status/{session_id}",
+    }
+    assert response["endpoints"]["start_goal"] == {
+        "method": "POST",
+        "path": "/api/companion/goals",
+    }
+    assert response["endpoints"]["goal_status"] == {
+        "method": "GET",
+        "path": "/api/companion/goals/{run_id}",
+    }
+    assert response["features"]["chat"] == {
+        "available": True,
+        "streaming": True,
+        "stream_path": "/api/chat_stream",
+        "resume_path": "/api/chat/resume/{session_id}",
+        "stop_path": "/api/chat/stop/{session_id}",
+        "status_path": "/api/chat/stream_status/{session_id}",
+        "request_body": "multipart_form_data",
+        "required_bearer_scope": "chat",
+        "agent_bash_requires_remote_development": True,
+    }
+    assert response["features"]["sessions"] == {"list": True, "create": True}
+    signed_commands = response["features"]["signed_commands"]
+    assert signed_commands["status"] == "workspace_file_control_ready"
+    assert signed_commands["enabled_routes"] == ["/api/companion/commands"]
+    assert signed_commands["required_bearer_scope"] == "remote_development"
+    assert signed_commands["protocol_version"] == 1
+    assert signed_commands["algorithm"] == "ed25519"
+    assert signed_commands["clock_skew_seconds"] == 300
+    assert signed_commands["canonical_payload"] == "json_body_sha256_v1"
+    assert signed_commands["headers"]["key_id"] == "X-Odysseus-Command-Key-Id"
+    assert "workspace_status" in signed_commands["allowed_commands"]
+    assert "edit_file" in signed_commands["allowed_commands"]
+    assert "run_check" in signed_commands["allowed_commands"]
+    command_catalog = {item["name"]: item for item in signed_commands["commands"]}
+    assert set(command_catalog) == set(signed_commands["allowed_commands"])
+    assert command_catalog["workspace_status"]["mode"] == "read_only"
+    assert command_catalog["workspace_status"]["mutating"] is False
+    assert command_catalog["workspace_status"]["args_schema"] == {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+    }
+    assert command_catalog["read_file"]["mode"] == "workspace_read"
+    assert command_catalog["read_file"]["requires_admin"] is True
+    assert command_catalog["edit_file"]["mode"] == "workspace_edit"
+    assert command_catalog["edit_file"]["mutating"] is True
+    assert command_catalog["edit_file"]["requires_admin"] is True
+    assert command_catalog["run_check"]["mode"] == "workspace_exec"
+    assert command_catalog["run_check"]["mutating"] is False
+    assert command_catalog["run_check"]["raw_shell"] is False
+    assert command_catalog["run_check"]["allowed_checks"] == [
+        "git_diff",
+        "git_status",
+        "py_compile",
+        "pytest",
+    ]
+    assert signed_commands["raw_shell_enabled"] is False
+    assert signed_commands["allowed_workspace_roots"] == [
+        "/workspace/alpha",
+        "/workspace/beta",
+    ]
+    assert signed_commands["mutating_commands_enabled"] is True
+    assert signed_commands["mutating_commands"] == ["edit_file"]
+    assert signed_commands["workspace_exec_enabled"] is True
+    assert signed_commands["allowed_checks"] == [
+        "git_diff",
+        "git_status",
+        "py_compile",
+        "pytest",
+    ]
+    assert signed_commands["key_registry"] == {
+        "status": "enrollment_ready",
+        "approved_keys_required": True,
+        "required_bearer_scope": "remote_development",
+        "list_path": "/api/companion/keys",
+        "register_path": "/api/companion/keys",
+        "revoke_path": "/api/companion/keys/{key_id}",
+        "public_key_table": "companion_device_keys",
+        "nonce_table": "companion_command_nonces",
+    }
+    remote_dev = response["features"]["remote_development"]
+    assert remote_dev["status"] == "signed_workspace_file_control_ready"
+    assert remote_dev["host_control_enabled"] is False
+    assert remote_dev["workspace_file_control_enabled"] is True
+    assert remote_dev["read_only_commands_enabled"] is True
+    assert remote_dev["mutating_commands_enabled"] is True
+    assert remote_dev["workspace_exec_enabled"] is True
+    assert remote_dev["allowed_workspace_roots"] == [
+        "/workspace/alpha",
+        "/workspace/beta",
+    ]
+    assert remote_dev["raw_shell_enabled"] is False
+    assert remote_dev["agent_bash_enabled"] is True
+    assert remote_dev["agent_bash_requires_remote_development"] is True
+    assert remote_dev["chat_stream_path"] == "/api/chat_stream"
+    assert remote_dev["command_path"] == "/api/companion/commands"
+    assert remote_dev["required_bearer_scope"] == "remote_development"
+    assert remote_dev["requires_signed_commands"] is True
+    assert remote_dev["requires_replay_protection"] is True
+    assert remote_dev["requires_admin_for_workspace_files"] is True
+    assert "react_native" in remote_dev["intended_clients"]
+    goal_runs = response["features"]["goal_runs"]
+    assert goal_runs["status"] == "server_owned_loop_ready"
+    assert goal_runs["available"] is True
+    assert goal_runs["required_bearer_scope"] == "chat"
+    assert goal_runs["requires_session_id"] is True
+    assert goal_runs["allow_bash_requires_remote_development"] is True
+    assert goal_runs["start_path"] == "/api/companion/goals"
+    assert goal_runs["resume_path"] == "/api/companion/goals/{run_id}/resume"
+    assert "GOAL_STATUS: complete" in goal_runs["completion_markers"]
+    assert response["safety"]["host_control"] == "signed_workspace_file_control_enabled_raw_shell_disabled"
+    assert response["safety"]["credential_authority"] == (
+        "revocable_chat_and_remote_development_scoped_token"
+    )
+
+
+def test_manifest_route_allows_cookie_sessions(monkeypatch):
+    monkeypatch.setattr(companion_routes, "get_current_user", lambda request: "alice")
+    req = _request(api_token=False, current_user="alice")
+
+    response = _route("/api/companion/manifest")(req)
+
+    assert response["owner"] == "alice"
+    assert response["auth"]["mode"] == "session"
+    assert response["auth"]["token_scopes"] == []
+
+
+def test_manifest_route_requires_chat_scope_for_bearer_token():
+    req = _request(api_token=True, api_token_scopes=["memory:read"], current_user="api")
+
+    with pytest.raises(HTTPException) as exc:
+        _route("/api/companion/manifest")(req)
+
+    assert exc.value.status_code == 403
+
 
 def test_token_owner_bearer_resolves_to_token_owner():
     # A paired bearer caller runs as the "api" pseudo-user, but must attribute
@@ -276,6 +564,28 @@ def test_models_route_unresolved_owner_returns_only_shared_rows(monkeypatch):
     )
 
     assert _endpoint_names(endpoints) == ["shared-endpoint"]
+
+
+def test_models_route_requires_chat_scope_for_bearer_token(monkeypatch):
+    rows = [
+        _ep(1, "alice-endpoint", "alice"),
+        _ep(2, "shared-endpoint", None),
+    ]
+    monkeypatch.setattr(companion_routes, "get_current_user", lambda request: "api")
+
+    with pytest.raises(HTTPException) as exc:
+        _call_models_route(
+            monkeypatch,
+            rows,
+            _request(
+                api_token=True,
+                api_token_owner="alice",
+                api_token_scopes=["todos:read"],
+                current_user="api",
+            ),
+        )
+
+    assert exc.value.status_code == 403
 
 
 def test_models_route_filters_hidden_models_and_secret_fields(monkeypatch):
