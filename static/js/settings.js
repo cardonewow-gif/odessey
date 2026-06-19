@@ -1741,6 +1741,48 @@ async function initAgentSettings() {
   }
 }
 
+/* ── Agent Tool Access (Tools tab, per-user prefs) ── */
+async function initAgentToolAccess() {
+  var allToolsToggle = el('set-agentAllTools');
+  var adminAlwaysToggle = el('set-agentAdminAlways');
+  if (!allToolsToggle && !adminAlwaysToggle) return;
+
+  try {
+    var res = await fetch('/api/prefs', { credentials: 'same-origin' });
+    var prefs = await res.json();
+    if (allToolsToggle) allToolsToggle.checked = !!prefs.agent_all_tools_enabled;
+    if (adminAlwaysToggle) adminAlwaysToggle.checked = !!prefs.agent_admin_tools_always;
+  } catch (e) {}
+
+  async function save(toggle, key) {
+    try {
+      var res = await fetch('/api/prefs/' + encodeURIComponent(key), {
+        method: 'PUT', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: toggle.checked })
+      });
+      if (!res.ok) {
+        toggle.checked = !toggle.checked;
+        if (uiModule && uiModule.showToast) uiModule.showToast('Failed to save preference');
+      }
+    } catch (e) {
+      toggle.checked = !toggle.checked;
+      if (uiModule && uiModule.showToast) uiModule.showToast('Failed to save preference');
+    }
+  }
+
+  if (allToolsToggle) {
+    allToolsToggle.addEventListener('change', function() {
+      save(allToolsToggle, 'agent_all_tools_enabled');
+    });
+  }
+  if (adminAlwaysToggle) {
+    adminAlwaysToggle.addEventListener('change', function() {
+      save(adminAlwaysToggle, 'agent_admin_tools_always');
+    });
+  }
+}
+
 /* ═══════════════════════════════════════════
    APPEARANCE TAB
    ═══════════════════════════════════════════ */
@@ -2350,6 +2392,7 @@ function initAll() {
   initResearchSettings();
   initResearchSearchSettings();
   initAgentSettings();
+  initAgentToolAccess();
   initAppearance();
   initShortcuts();
   initAccount();
