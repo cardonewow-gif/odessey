@@ -4,6 +4,7 @@
 // ============================================
 import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
+import workspaceModule from './js/workspace.js';
 import fileHandlerModule from './js/fileHandler.js';
 import modelsModule from './js/models.js';
 import ragModule from './js/rag.js';
@@ -1217,7 +1218,7 @@ function initializeEventListeners() {
       sortDropdown.querySelectorAll('.sort-option').forEach(o => {
         const check = o.querySelector('.sort-check') || document.createElement('span');
         check.className = 'sort-check';
-        check.style.cssText = 'float:right;font-size:20px;line-height:1;position:relative;top:3px;color:var(--accent, var(--red));opacity:' + (o.dataset.sort === current ? '1' : '0');
+        check.style.cssText = 'float:right;font-size:20px;line-height:1;position:relative;top:1px;color:var(--accent, var(--red));opacity:' + (o.dataset.sort === current ? '1' : '0');
         check.textContent = '\u2022';
         if (!o.querySelector('.sort-check')) o.appendChild(check);
       });
@@ -1261,9 +1262,9 @@ function initializeEventListeners() {
             let msg;
             if (data.updated > 0) {
               msg = `Sorted ${data.updated} into ${data.folders.length} folder${data.folders.length === 1 ? '' : 's'}`;
-              if (remaining > 0) msg += ` — ${remaining} unfiled left, hit Tidy again`;
+              if (remaining > 0) msg += ` — ${remaining} unfiled left, hit Group again`;
             } else if (remaining > 0) {
-              msg = `${remaining} unfiled chats — hit Tidy again`;
+              msg = `${remaining} unfiled chats — hit Group again`;
             } else {
               msg = 'All sorted';
             }
@@ -1284,17 +1285,6 @@ function initializeEventListeners() {
 
     const autoSortBtn = el('auto-sort-sessions-btn');
     if (autoSortBtn) autoSortBtn.addEventListener('click', () => _runTidy(false));
-
-    // Chevron next to the Tidy row toggles the no-AI sub-item.
-    const autoSortMoreBtn = el('auto-sort-sessions-more');
-    const autoSortNoaiBtn = el('auto-sort-sessions-noai-btn');
-    if (autoSortMoreBtn && autoSortNoaiBtn) {
-      autoSortMoreBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        autoSortNoaiBtn.style.display = autoSortNoaiBtn.style.display === 'none' ? 'block' : 'none';
-      });
-      autoSortNoaiBtn.addEventListener('click', () => _runTidy(true));
-    }
   }
 
   // Model sort dropdown
@@ -1622,6 +1612,8 @@ function initializeEventListeners() {
       // Slide the pill to the active button
       const toggle = agentBtn.closest('.mode-toggle');
       if (toggle) toggle.classList.toggle('mode-chat', mode === 'chat');
+      // Workspace pill + overflow entry are agent-only - hide immediately (no flash).
+      try { workspaceModule.applyMode(mode); } catch (_) {}
       // Delay tool glow-up for a staggered effect
       setTimeout(() => applyModeToToggles(mode), 500);
     }
@@ -1697,6 +1689,7 @@ function initializeEventListeners() {
   }
   setupToggle('web-toggle-btn', 'web-toggle', 'web');
   setupToggle('bash-toggle-btn', 'bash-toggle', 'bash');
+  try { workspaceModule.initWorkspace(); } catch (_) {}
 
   // Document editor toggle (special: uses module panel, not a checkbox)
   const overflowDocBtn = el('overflow-doc-btn');
@@ -3131,7 +3124,9 @@ function initializeEventListeners() {
       setTimeout(() => uiModule.autoResize(textarea), 1);
     });
     textarea.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      const isMobile = window.innerWidth <= 768
+
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isMobile) {
         // If ghost autocomplete is active, accept the suggestion instead of submitting
         if (window._ghostAutocomplete && window._ghostAutocomplete.isActive()) {
           e.preventDefault();
@@ -3704,7 +3699,9 @@ function startOdysseusApp() {
   // Enter to send (shift+enter for newline), or new chat when empty
   if (messageInput) {
     messageInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      const isMobile = window.innerWidth <= 768
+
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isMobile) {
         e.preventDefault();
         // Flush the debounced icon update so dataset.mode reflects the current
         // text state. Without this, a fast type-and-Enter would still see the

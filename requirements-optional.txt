@@ -38,3 +38,4 @@ ollama
 pydantic
 fastmcp
 pydantic_ai
+markitdown[docx,pptx,xlsx,xls]==0.1.6
