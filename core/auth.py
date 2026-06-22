@@ -77,12 +77,21 @@ def normalize_known_username(users: Dict[str, Any], username: str | None) -> Opt
     return key
 
 
+def _bcrypt_secret(password: str) -> bytes:
+    # bcrypt only consumes the first 72 bytes, and newer bindings raise
+    # ValueError on longer input instead of truncating silently. Truncate here
+    # so hashing and verifying stay consistent and an over-long password (e.g. a
+    # browser autofill / password-manager blob) fails authentication cleanly
+    # instead of crashing the login route with a 500.
+    return password.encode("utf-8")[:72]
+
+
 def _hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    return bcrypt.hashpw(_bcrypt_secret(password), bcrypt.gensalt()).decode("utf-8")
 
 
 def _verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+    return bcrypt.checkpw(_bcrypt_secret(password), hashed.encode("utf-8"))
 
 
 class SetAdminResult(enum.Enum):
