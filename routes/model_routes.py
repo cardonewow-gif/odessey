@@ -20,6 +20,7 @@ from core.database import SessionLocal, ModelEndpoint, Session as DbSession
 from core.log_safety import redact_url as _redact_url_for_log
 from core.middleware import require_admin
 from src.llm_core import _detect_provider, _host_match, ANTHROPIC_MODELS
+from src.nobodywho_provider import is_nobodywho_url, manager as _nobodywho
 from src.tls_overrides import llm_verify
 from src.settings import load_settings as _load_settings, save_settings as _save_settings
 from src.endpoint_resolver import (
@@ -601,6 +602,15 @@ def _resolve_probe_key(ep) -> Optional[str]:
 def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 10, with_tools: bool = False) -> dict:
     """Send a realistic completion request to a single model. Returns {status, latency_ms, error?}."""
     provider = _safe_detect_provider(base)
+    if provider == "nobodywho":
+        # A real completion would load the whole model into RAM/VRAM — far too
+        # heavy for a routine probe. Verify the GGUF resolves instead.
+        try:
+            t0 = _time.time()
+            _nobodywho.resolve_source(model_id)
+            return {"status": "ok", "latency_ms": round((_time.time() - t0) * 1000)}
+        except Exception as e:
+            return {"status": "fail", "error": str(e)[:120]}
     if _is_discovery_only_provider(provider):
         return {"status": "ok", "latency_ms": 0, "skipped": True}
     messages = [
@@ -691,6 +701,8 @@ def _classify_endpoint(base_url: str, endpoint_kind: str = "auto") -> str:
         return "local"
     if kind in ("api", "proxy"):
         return "api"
+    if is_nobodywho_url(base_url):
+        return "local"  # in-process inference is local by definition
     try:
         host = urlparse(base_url).hostname or ""
         if host in _LOCAL_HOSTS or _local_ip_literal(host):
@@ -733,6 +745,19 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
     from src.llm_core import httpx_get_kimi_aware
     base = resolve_url(_normalize_base(base_url))
     provider = _safe_detect_provider(base)
+    if is_nobodywho_url(base):
+        # In-process provider: "probing" is a local GGUF scan, no HTTP. The
+        # scan works even without the nobodywho package — but the models are
+        # unusable then, so report none and let callers ping: that surfaces
+        # the install offer instead of a healthy-looking endpoint that fails
+        # on the first chat.
+        if not _nobodywho.is_available():
+            return []
+        try:
+            return _nobodywho.list_models(max_age=0.0)
+        except Exception as e:
+            logger.warning(f"NobodyWho model scan failed: {e}")
+            return []
     if provider == "chatgpt-subscription":
         from src.chatgpt_subscription import fetch_available_models
         if api_key:
@@ -826,10 +851,26 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
     return []
 
 
+def _empty_state_hint(base_url: str) -> Optional[str]:
+    """Actionable next step for a reachable endpoint that lists zero models.
+
+    "Online — no models found" is technically true and practically useless for
+    someone who doesn't know what a GGUF is. For providers where we know the
+    fix (NobodyWho: get a model via Cookbook / drop a file), say it.
+    """
+    if is_nobodywho_url(base_url) and _nobodywho.is_available():
+        from src.nobodywho_provider import EMPTY_MODELS_HINT
+        return EMPTY_MODELS_HINT
+    return None
+
+
 def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> Dict[str, Any]:
     """Reachability probe that does not require installed/listed models."""
     from src.endpoint_resolver import resolve_url
     base = resolve_url(_normalize_base(base_url))
+    if is_nobodywho_url(base):
+        # "Reachable" = the optional python package imports; no network probe.
+        return _nobodywho.ping()
     headers = _safe_build_headers(api_key, base)
 
     # Ollama exposes /v1/models (OpenAI-compatible) AND native /api/version,
@@ -964,6 +1005,19 @@ def _model_endpoint_error_message(base_url: str, ping: Dict[str, Any] = None) ->
             "http://host.docker.internal:1234/v1 (Docker)."
         )
         return " ".join(parts)
+
+    if is_nobodywho_url(base_url):
+        if not _nobodywho.is_available():
+            return _nobodywho.availability_error() or (
+                "NobodyWho is not installed. Install with: pip install nobodywho"
+            )
+        from src.nobodywho_provider import _models_dir
+        return (
+            "NobodyWho is installed but no GGUF models were found. "
+            f"Put a .gguf file in {_models_dir()} (or set NOBODYWHO_MODELS_DIR), "
+            "or pin a 'huggingface:owner/repo/file.gguf' ref on the endpoint — "
+            "it downloads automatically on first use."
+        )
 
     if is_ollama:
         parts = ["No Ollama models found for that endpoint."]
@@ -1177,21 +1231,24 @@ def setup_model_routes(model_discovery):
                     def _probe_one(key: str, data: Dict[str, Any]):
                         try:
                             ids = _probe_endpoint(data["base"], data.get("api_key"), timeout=data.get("timeout") or 2)
-                            return key, data["endpoint_ids"], ids, None
+                            return key, data["endpoint_ids"], data["base"], ids, None
                         except Exception as e:
-                            return key, data["endpoint_ids"], None, e
+                            return key, data["endpoint_ids"], data["base"], None, e
 
                     if groups:
                         with ThreadPoolExecutor(max_workers=min(4, len(groups))) as pool:
                             futures = [pool.submit(_probe_one, key, data) for key, data in groups.items()]
                             for fut in as_completed(futures):
-                                key, endpoint_ids, ids, err = fut.result()
+                                key, endpoint_ids, base_url, ids, err = fut.result()
                                 st = _refresh_state.setdefault(key, {})
-                                if ids:
+                                # An empty result from the in-process provider's
+                                # filesystem scan is authoritative (files deleted),
+                                # not a transient outage — accept it.
+                                if ids or (err is None and is_nobodywho_url(base_url)):
                                     for ep_id in endpoint_ids:
                                         ep_obj = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
                                         if ep_obj:
-                                            ep_obj.cached_models = json.dumps(ids)
+                                            ep_obj.cached_models = json.dumps(ids) if ids else None
                                             changed = True
                                     st["last_success"] = _time.time()
                                     st["fail_count"] = 0
@@ -1247,6 +1304,8 @@ def setup_model_routes(model_discovery):
                 ep.hidden_models,
                 getattr(ep, "pinned_models", None),
             )
+            if provider == "nobodywho" and not _nobodywho.is_available():
+                model_ids = []  # engine missing — nothing here is chat-able (pinned refs included)
             # Build correct URL based on provider
             chat_url = build_chat_url(base)
             kind = _effective_endpoint_kind(ep, base)
@@ -1608,6 +1667,12 @@ def setup_model_routes(model_discovery):
                 # admin-pinned IDs that a probe would never surface.
                 status = "online" if (all_models or pinned) else "offline"
                 ping = None
+                base = _normalize_base(r.base_url)
+                if is_nobodywho_url(r.base_url) and not _nobodywho.is_available():
+                    # Cached models can't mask a missing engine: without the
+                    # package nothing here is usable — show the install offer.
+                    status = "offline"
+                    ping = _nobodywho.ping()
                 # When cached_models is empty, do a quick reachability probe.
                 # Bumped 1.0s → 3.5s because the user reported endpoints they
                 # were ACTIVELY chatting with showed "offline" — the previous
@@ -1617,7 +1682,9 @@ def setup_model_routes(model_discovery):
                 # 3.5s still keeps the picker render snappy in the common
                 # "everything's already cached" path because this branch only
                 # runs for endpoints with an empty cached_models.
-                if not all_models and not pinned and r.is_enabled:
+                # Discovery-only providers have no health endpoint — an
+                # unauthenticated ping just 401s, so don't bother.
+                elif not all_models and not pinned and r.is_enabled and not _is_discovery_only_provider(_safe_detect_provider(base)):
                     base_for_ping = _normalize_base(r.base_url)
                     kind_for_ping = _effective_endpoint_kind(r, base_for_ping)
                     ping_timeout = 10.0 if _classify_endpoint(base_for_ping, kind_for_ping) == "local" else 3.5
@@ -1665,7 +1732,10 @@ def setup_model_routes(model_discovery):
                                 status = "online"
                         except Exception as _refill_err:
                             logger.debug(f"opportunistic cached_models refill failed for {r.id}: {_refill_err!r}")
-                base = _normalize_base(r.base_url)
+                        # Only surface the empty-state hint if the opportunistic
+                        # refill above didn't turn this into a populated endpoint.
+                        if status == "empty":
+                            ping["error"] = ping.get("error") or _empty_state_hint(r.base_url)
                 kind = _effective_endpoint_kind(r, base)
                 results.append({
                     "id": r.id,
@@ -1717,6 +1787,11 @@ def setup_model_routes(model_discovery):
         base_url = _normalize_base(base_url)
         if not base_url:
             raise HTTPException(400, "Base URL is required")
+        if is_nobodywho_url(base_url):
+            # One canonical spelling so dedupe-by-base_url can't create
+            # "nobodywho:" and "nobodywho:local" twins.
+            from src.nobodywho_provider import CANONICAL_URL
+            base_url = CANONICAL_URL
         # Resolve hostname via Tailscale if DNS fails
         from src.endpoint_resolver import resolve_url
         base_url = resolve_url(base_url)
@@ -1727,7 +1802,10 @@ def setup_model_routes(model_discovery):
 
         # Auto-generate name from URL if not provided
         if not name.strip():
-            name = base_url.replace("http://", "").replace("https://", "").split("/")[0]
+            if is_nobodywho_url(base_url):
+                name = "NobodyWho"
+            else:
+                name = base_url.replace("http://", "").replace("https://", "").split("/")[0]
 
         requested_kind = _normalize_endpoint_kind(endpoint_kind)
         refresh_mode = _normalize_refresh_mode(model_refresh_mode, requested_kind)
@@ -1810,6 +1888,11 @@ def setup_model_routes(model_discovery):
                 existing_models = _cached_model_ids(existing)
                 _existing_pinned = _normalize_model_ids(getattr(existing, "pinned_models", None))
                 existing_kind = _effective_endpoint_kind(existing, existing.base_url)
+                # Don't hardcode "online": a re-POSTed endpoint with zero
+                # models must report "empty" (with the get-a-model hint) so
+                # callers — e.g. the post-install verification — can show the
+                # next step instead of a bare success.
+                _existing_status = "online" if (existing_models or _existing_pinned) else "empty"
                 return {
                     "id": existing.id,
                     "name": existing.name,
@@ -1823,7 +1906,8 @@ def setup_model_routes(model_discovery):
                     ),
                     "pinned_models": _existing_pinned,
                     "online": True,
-                    "status": "online",
+                    "status": _existing_status,
+                    "ping_error": _empty_state_hint(existing.base_url) if _existing_status == "empty" else None,
                     "existing": True,
                     "endpoint_kind": existing_kind,
                     "category": _classify_endpoint(existing.base_url, existing_kind),
@@ -1843,6 +1927,10 @@ def setup_model_routes(model_discovery):
         try:
             _st_raw = (supports_tools or "").strip().lower()
             _st = True if _st_raw in ("true", "1", "yes") else (False if _st_raw in ("false", "0", "no") else None)
+            if _st is None and is_nobodywho_url(base_url):
+                # NobodyWho can't emit OpenAI-style tool_calls (tools run inside
+                # its generation loop), so the agent uses the fenced-block path.
+                _st = False
             _pinned = _normalize_model_ids(pinned_models)
             # Stamp owner so the picker only shows this endpoint to the admin
             # who added it. Pass `shared=true` to mark it null-owner (visible
@@ -1892,6 +1980,8 @@ def setup_model_routes(model_discovery):
             db.close()
 
         # Return immediately — probing happens via the separate /probe SSE endpoint
+        if not model_ids and not _pinned and ping.get("reachable"):
+            ping["error"] = ping.get("error") or _empty_state_hint(base_url)
         return {
             "id": ep_id,
             "name": name.strip(),
@@ -1919,6 +2009,9 @@ def setup_model_routes(model_discovery):
         base_url = _normalize_base(base_url)
         if not base_url:
             raise HTTPException(400, "Base URL is required")
+        if is_nobodywho_url(base_url):
+            from src.nobodywho_provider import CANONICAL_URL
+            base_url = CANONICAL_URL
         from src.endpoint_resolver import resolve_url
         base_url = resolve_url(base_url)
         base_url = _rewrite_loopback_for_docker(base_url)
@@ -1927,6 +2020,8 @@ def setup_model_routes(model_discovery):
         probe_timeout = _explicit_model_list_timeout(base_url, requested_kind, configured_timeout)
         models = _probe_endpoint(base_url, api_key.strip() or None, timeout=probe_timeout)
         ping = {"reachable": True, "error": None} if models else _ping_endpoint(base_url, api_key.strip() or None, timeout=min(probe_timeout, 10.0))
+        if not models and ping.get("reachable"):
+            ping["error"] = ping.get("error") or _empty_state_hint(base_url)
         return {
             "base_url": base_url,
             "online": bool(models) or bool(ping.get("reachable")),
@@ -2015,9 +2110,13 @@ def setup_model_routes(model_discovery):
                 except Exception as exc:
                     logger.warning("Manual model refresh failed for endpoint %s at %s: %s", ep_id, base, exc)
                     probed = []
-                if probed:
+                # Keeping cached models on an empty probe protects against a
+                # briefly-down HTTP server — but the in-process provider's
+                # probe is a filesystem scan, so an empty result is the truth
+                # (the files were deleted), not an outage. Trust it.
+                if probed or is_nobodywho_url(base):
                     all_models = probed
-                    ep.cached_models = json.dumps(all_models)
+                    ep.cached_models = json.dumps(probed) if probed else None
                     db.commit()
                     _invalidate_models_cache()
                     response.headers["X-Model-Refresh-Status"] = "refreshed"

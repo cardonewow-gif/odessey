@@ -376,6 +376,103 @@ function initAddUser() {
 /* ═══════════════════════════════════════════
    SERVICES TAB — Endpoints
    ═══════════════════════════════════════════ */
+// Render an empty-endpoint hint with "Cookbook" as a working link. The hint
+// text arrives as plain ping_error from the backend; escape it all, then link
+// the literal word so non-technical users can click straight to the fix.
+function _emptyHintHtml(text) {
+  return esc(String(text)).replace(
+    'Cookbook',
+    '<a href="/cookbook" class="adm-open-cookbook" style="color:var(--accent);text-decoration:underline;">Cookbook</a>'
+  );
+}
+
+// Cookbook fires this when a model download completes — refresh the endpoint
+// list so in-process providers (NobodyWho) show the new model without a page
+// reload. Second pass picks up the backend's forced background cache sweep.
+document.addEventListener('odysseus:models-changed', () => {
+  loadEndpoints().catch(() => {});
+  setTimeout(() => loadEndpoints().catch(() => {}), 5000);
+});
+
+// Render the "NobodyWho is not installed" hint with a working install offer:
+// one click runs the same allowlisted pip install Cookbook's Dependencies tab
+// uses, then re-tests the endpoint. Text is escaped before the button is added.
+function _nobodywhoInstallHint(text) {
+  return `${esc(String(text))} <button type="button" class="admin-btn-sm adm-install-nobodywho" style="margin-left:6px;">Install now</button>`;
+}
+
+function _isNobodywhoInstallHint(text) {
+  return /pip install nobodywho/i.test(String(text || ''));
+}
+
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.adm-install-nobodywho');
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = 'Installing… (can take a minute)';
+  try {
+    const res = await fetch('/api/cookbook/packages/install', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pip: 'nobodywho' }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (res.ok && d.ok) {
+      // Replace the WHOLE stale "not installed" message, not just the button —
+      // and re-test via the API directly (the add flow clears the URL input,
+      // so re-clicking Test cannot be relied on).
+      const msgEl = btn.closest('#adm-epLocalMsg, #adm-epApiMsg');
+      if (msgEl) { msgEl.textContent = 'NobodyWho installed — verifying endpoint…'; msgEl.className = ''; }
+      else { btn.textContent = 'Installed ✓'; }
+      try {
+        // Re-POST the endpoint: the create route's dedupe branch re-probes
+        // and PERSISTS the model list on the existing row — the stateless
+        // /test route verifies but leaves cached_models empty, which left
+        // the endpoint list saying "no models" while the toast said online.
+        const fd = new FormData();
+        fd.append('base_url', 'nobodywho:local');
+        const tRes = await fetch('/api/model-endpoints', { method: 'POST', body: fd, credentials: 'same-origin' });
+        const t = await tRes.json();
+        const n = (t.models || []).length;
+        if (msgEl) {
+          if (tRes.ok && n > 0) {
+            msgEl.textContent = `NobodyWho installed — online, found ${n} model${n !== 1 ? 's' : ''}`;
+          } else if (tRes.ok && t.status === 'empty') {
+            msgEl.innerHTML = 'NobodyWho installed — ' + (t.ping_error ? _emptyHintHtml(t.ping_error) : 'no models found');
+          } else {
+            msgEl.textContent = 'NobodyWho installed.';
+          }
+          msgEl.className = 'admin-success';
+        }
+      } catch (_) {
+        if (msgEl) { msgEl.textContent = 'NobodyWho installed.'; msgEl.className = 'admin-success'; }
+      }
+      await loadEndpoints();  // row now reflects the persisted model list
+      try { window.modelsModule?.refreshModels?.(true); } catch (_) {}  // picker too
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Install failed — see Cookbook → Dependencies';
+    }
+  } catch (_) {
+    btn.disabled = false;
+    btn.textContent = 'Install failed — see Cookbook → Dependencies';
+  }
+});
+
+// One delegated handler for every place the hint renders (test result, add
+// toasts, endpoint rows — rows re-render on refresh, so per-render binding
+// would leak or miss). Closes Settings, then opens Cookbook the same way
+// cookbook-diagnosis.js does, with the sidebar button as fallback.
+document.addEventListener('click', (e) => {
+  const link = e.target.closest('.adm-open-cookbook');
+  if (!link) return;
+  e.preventDefault();
+  try { settingsModule.close(); } catch (_) { /* settings may not be open */ }
+  const cookbook = window.cookbookModule;
+  if (cookbook && typeof cookbook.open === 'function') cookbook.open();
+  else el('tool-cookbook-btn')?.click();
+});
+
 function _isLocalEndpoint(url) {
   if (!url) return false;
   try {
@@ -513,6 +610,8 @@ async function loadEndpoints() {
             </div>
           </div>
           <div class="admin-ep-detail">${esc(ep.base_url)}${category === 'local' ? `<button type="button" class="admin-ep-copy-btn" data-adm-copy-url="${esc(ep.base_url)}" title="Copy URL" aria-label="Copy URL" style="background:none;border:none;padding:0 2px;margin-left:6px;cursor:pointer;color:inherit;opacity:0.45;vertical-align:-2px;line-height:1;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : ''}${keyLabel}</div>
+          ${ep.status === 'empty' && ep.ping_error ? `<div class="admin-ep-detail" style="opacity:0.75;">${_emptyHintHtml(ep.ping_error)}</div>` : ''}
+          ${!ep.online && _isNobodywhoInstallHint(ep.ping_error) ? `<div class="admin-ep-detail" style="opacity:0.75;">${_nobodywhoInstallHint(ep.ping_error)}</div>` : ''}
           ${hasModels ? `<div class="mcp-tools-panel hidden" data-adm-ep-models-panel="${ep.id}"></div>` : ''}
         </div>`;
     });
@@ -913,6 +1012,9 @@ function initEndpointForm() {
   }
   function _normalizeBaseUrl(raw) {
     let u = raw.trim();
+    // NobodyWho is an in-process provider with a pseudo base URL, not http(s) —
+    // keep it out of the URL fixups below (which would prefix http://).
+    if (/^nobodywho(:.*)?$/i.test(u)) return 'nobodywho:local';
     // Fix common protocol typos
     u = u.replace(/^https?:\/(?!\/)/, m => m + '/');  // https:/ → https://
     u = u.replace(/^htp:/, 'http:').replace(/^htps:/, 'https:');
@@ -961,7 +1063,7 @@ function initEndpointForm() {
 
   function _renderEndpointTestResult(msg, res, d) {
     if (res.ok && d.status === 'empty') {
-      msg.textContent = 'Online — no models found';
+      msg.innerHTML = 'Online — ' + (d.ping_error ? _emptyHintHtml(d.ping_error) : 'no models found');
       msg.className = 'admin-success';
       return;
     }
@@ -972,7 +1074,12 @@ function initEndpointForm() {
       msg.className = 'admin-success';
       return;
     }
-    msg.textContent = (d && d.detail) || (d && d.ping_error ? `Offline — ${d.ping_error}` : 'Offline');
+    const offlineText = (d && d.detail) || (d && d.ping_error) || '';
+    if (_isNobodywhoInstallHint(offlineText)) {
+      msg.innerHTML = _nobodywhoInstallHint(offlineText);
+    } else {
+      msg.textContent = offlineText ? `Offline — ${offlineText}` : 'Offline';
+    }
     msg.className = 'admin-error';
   }
 
@@ -1084,7 +1191,7 @@ function initEndpointForm() {
           msg.innerHTML = 'Added (endpoint offline — will retry on next load)' + goLink;
           msg.className = 'admin-error';
         } else if (d.status === 'empty') {
-          msg.innerHTML = 'Added — endpoint reachable, no models found' + goLink;
+          msg.innerHTML = 'Added — ' + (d.ping_error ? _emptyHintHtml(d.ping_error) : 'endpoint reachable, no models found') + goLink;
           msg.className = 'admin-success';
         } else {
           msg.innerHTML = `Added — found ${count} model${count !== 1 ? 's' : ''}` + goLink;
@@ -1535,12 +1642,16 @@ function initEndpointForm() {
           await loadEndpoints();
           await _selectAddedModelInChat(d);
           const count = (d.models || []).length;
-          const baseText = d.status === 'empty'
-            ? 'Added — Ollama is running, no models pulled yet'
-            : d.online
-            ? `Added — found ${count} model${count !== 1 ? 's' : ''}`
-            : 'Added (offline — will retry on next load)';
-          msg.innerHTML = `${baseText} <a href="#" data-go-added-models style="margin-left:6px;text-decoration:underline;color:inherit;font-weight:600;">Added Models →</a>`;
+          const goLink = ' <a href="#" data-go-added-models style="margin-left:6px;text-decoration:underline;color:inherit;font-weight:600;">Added Models →</a>';
+          if (d.status === 'empty') {
+            msg.innerHTML = 'Added — ' + (d.ping_error ? _emptyHintHtml(d.ping_error) : 'Ollama is running, no models pulled yet') + goLink;
+          } else if (!d.online && _isNobodywhoInstallHint(d.ping_error)) {
+            msg.innerHTML = 'Added — ' + _nobodywhoInstallHint(d.ping_error);
+          } else {
+            msg.innerHTML = (d.online
+              ? `Added — found ${count} model${count !== 1 ? 's' : ''}`
+              : 'Added (offline — will retry on next load)') + goLink;
+          }
           msg.className = d.online ? 'admin-success' : 'admin-error';
         } else { msg.textContent = d.detail || 'Failed'; msg.className = 'admin-error'; }
       } catch (e) { msg.textContent = 'Request failed'; msg.className = 'admin-error'; }
@@ -1560,6 +1671,23 @@ function initEndpointForm() {
       const msg = _endpointMsg('local');
       if (msg) {
         msg.innerHTML = '<span style="font-size:11px;opacity:0.55;">Ollama ready to test.</span>';
+        msg.className = '';
+      }
+    });
+  }
+
+  // NobodyWho — in-process inference (pip install nobodywho), pseudo base URL
+  const nobodywhoBtn = el('adm-epNobodyWhoBtn');
+  if (nobodywhoBtn) {
+    nobodywhoBtn.addEventListener('click', () => {
+      const input = el('adm-epLocalUrl');
+      if (input) {
+        input.value = 'nobodywho:local';
+        input.focus();
+      }
+      const msg = _endpointMsg('local');
+      if (msg) {
+        msg.innerHTML = '<span style="font-size:11px;opacity:0.55;">NobodyWho ready to test — needs <code>pip install nobodywho</code> and a .gguf in data/models.</span>';
         msg.className = '';
       }
     });

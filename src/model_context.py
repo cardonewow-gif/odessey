@@ -14,6 +14,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from src.nobodywho_provider import configured_n_ctx, is_nobodywho_url
+
 logger = logging.getLogger(__name__)
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal"}
@@ -237,6 +239,16 @@ _context_cache: Dict[Tuple[str, str], Tuple[int, bool]] = {}
 def _get_context_length_cached(endpoint_url: str, model: str) -> Tuple[int, bool]:
     """Return (context_length, known). ``known`` is False only when the value is a
     bare DEFAULT_CONTEXT fallback (no endpoint report and not in the known table)."""
+    if is_nobodywho_url(endpoint_url):
+        # In-process provider: report the per-model allocation (trained max,
+        # capped by what fits this machine's memory — Cookbook-consistent).
+        # This window is authoritative (not a DEFAULT_CONTEXT guess), so it is
+        # reported as known=True and is safe to scale the agent budget against.
+        try:
+            from src.nobodywho_provider import manager as _nbw_manager
+            return _nbw_manager.context_length(model), True
+        except Exception:
+            return configured_n_ctx(), True
     configured_kind = _configured_endpoint_kind(endpoint_url)
     is_local = is_local_endpoint(endpoint_url)
     # Key on (endpoint_url, model): the same model id can be served by two
