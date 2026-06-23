@@ -19,9 +19,9 @@ def test_model_resolver_applies_owner_filter():
 
 
 def test_model_listing_and_image_fallback_are_owner_scoped():
-    # list_models moved to agent_tools.model_interaction_tools (#3629).
-    list_body = _source(model_interaction_tools.list_models)
-    image_body = _source(ai_interaction.do_generate_image)
+    from src.agent_tools.image_tools import GenerateImageTool
+    list_body = _source(ai_interaction.do_list_models)
+    image_body = _source(GenerateImageTool.execute)
 
     assert "owner: Optional[str] = None" in list_body
     assert "owner_filter(query, ModelEndpoint, owner)" in list_body
@@ -35,6 +35,9 @@ def test_model_listing_and_image_fallback_are_owner_scoped():
 # by tests/test_model_interaction_registry.py. The remaining model-ish tools
 # still dispatched here:
 @pytest.mark.parametrize("tool,content", [
+    ("chat_with_model", "gpt-test\nhello"),
+    ("list_models", ""),
+    ("ask_teacher", "gpt-test\nhelp me"),
     ("pipeline", "gpt-test | summarize this"),
     ("ui_control", "switch_model gpt-test"),
 ])
@@ -47,6 +50,18 @@ async def test_dispatch_passes_owner_to_model_tools(monkeypatch, tool, content):
 
     monkeypatch.setattr(
         ai_interaction,
+        "do_chat_with_model",
+        lambda content, session_id=None, owner=None: capture("chat_with_model", content, session_id, owner),
+    )
+    monkeypatch.setattr(
+        ai_interaction,
+        "do_list_models",
+        lambda content, session_id=None, owner=None: capture("list_models", content, session_id, owner),
+    )
+    monkeypatch.setattr(
+        ai_interaction,
+        "do_ask_teacher",
+        lambda content, session_id=None, owner=None: capture("ask_teacher", content, session_id, owner),
         "do_pipeline",
         lambda content, session_id=None, owner=None: capture("pipeline", content, session_id, owner),
     )

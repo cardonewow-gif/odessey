@@ -22,6 +22,17 @@ from .subprocess_tools import BashTool, PythonTool
 from .web_tools import WebSearchTool, WebFetchTool
 from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
+from .chat_history_tools import SearchChatsTool
+from .task_tools import ManageTasksTool
+from .skill_tools import ManageSkillsTool
+from .memory_tools import ManageMemoryTool
+from .rag_tools import ManageRagTool
+from .pipeline_tools import PipelineTool
+from .ui_tools import UIControlTool
+from .vault_tools import VaultSearchTool, VaultGetTool, VaultUnlockTool
+from .research_tools import TriggerResearchTool, ManageResearchTool
+from .api_integration_tools import ApiCallTool, AppApiTool
+from .image_tools import EditImageTool, GenerateImageTool
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool
 from .bg_job_tools import ManageBgJobsTool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
@@ -42,6 +53,22 @@ TOOL_HANDLERS = {
     "edit_document": EditDocumentTool().execute,
     "suggest_document": SuggestDocumentTool().execute,
     "manage_documents": ManageDocumentTool().execute,
+    "search_chats": SearchChatsTool().execute,
+    "manage_tasks": ManageTasksTool().execute,
+    "manage_skills": ManageSkillsTool().execute,
+    "manage_memory": ManageMemoryTool().execute,
+    "manage_rag": ManageRagTool().execute,
+    "pipeline": PipelineTool().execute,
+    "ui_control": UIControlTool().execute,
+    "vault_search": VaultSearchTool().execute,
+    "vault_get": VaultGetTool().execute,
+    "vault_unlock": VaultUnlockTool().execute,
+    "trigger_research": TriggerResearchTool().execute,
+    "manage_research": ManageResearchTool().execute,
+    "api_call": ApiCallTool().execute,
+    "app_api": AppApiTool().execute,
+    "edit_image": EditImageTool().execute,
+    "generate_image": GenerateImageTool().execute,
     "get_workspace": GetWorkspaceTool().execute,
     "chat_with_model": ChatWithModelTool().execute,
     "ask_teacher": AskTeacherTool().execute,
@@ -108,7 +135,6 @@ from src.tool_parsing import (  # noqa: E402, F401
     parse_tool_blocks,
     strip_tool_blocks,
     _TOOL_NAME_MAP,
-    _TOOL_BLOCK_RE,
     _TOOL_CALL_RE,
     _XML_TOOL_CALL_RE,
     _XML_INVOKE_RE,
@@ -135,13 +161,9 @@ from .document_tools import (
 
 # Implementations
 from src.tool_implementations import (  # noqa: E402, F401
-    do_search_chats,
-    do_manage_skills,
-    do_manage_tasks,
     do_manage_endpoints,
     do_manage_mcp,
     do_manage_webhooks,
     do_manage_tokens,
     do_manage_settings,
-    do_api_call,
 )

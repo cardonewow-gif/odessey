@@ -352,27 +352,6 @@ def _parse_generate_image(content: str) -> Dict:
     return args
 
 
-def _parse_manage_memory(content: str) -> Dict:
-    lines = content.strip().split("\n")
-    action = lines[0].strip().lower() if lines else ""
-    args = {"action": action}
-    if action == "add":
-        args["text"] = lines[1].strip() if len(lines) > 1 else ""
-        if len(lines) > 2 and lines[2].strip():
-            args["category"] = lines[2].strip().lower()
-    elif action == "edit":
-        args["memory_id"] = lines[1].strip() if len(lines) > 1 else ""
-        args["text"] = lines[2].strip() if len(lines) > 2 else ""
-    elif action == "delete":
-        args["memory_id"] = lines[1].strip() if len(lines) > 1 else ""
-    elif action == "search":
-        args["text"] = lines[1].strip() if len(lines) > 1 else ""
-    elif action == "list":
-        if len(lines) > 1 and lines[1].strip():
-            args["category"] = lines[1].strip().lower()
-    return args
-
-
 def _parse_write_file(content: str) -> Dict:
     lines = content.split("\n", 1)
     return {"path": lines[0].strip(), "content": lines[1] if len(lines) > 1 else ""}
@@ -386,7 +365,6 @@ _MCP_ARG_PARSERS: Dict[str, Callable[[str], Dict[str, str]]] = {
     "read_file":      lambda c: {"path": c.split("\n")[0].strip()},
     "write_file":     _parse_write_file,
     "generate_image": _parse_generate_image,
-    "manage_memory":  _parse_manage_memory,
 }
 
 
@@ -562,8 +540,7 @@ async def _execute_tool_block_impl(
     events while the command is in flight. Ignored by other tools.
     """
     from src.tool_implementations import (
-        do_search_chats, do_manage_tasks,
-        do_manage_skills, do_api_call, do_manage_endpoints,
+        do_manage_endpoints,
         do_manage_mcp, do_manage_webhooks, do_manage_tokens,
         do_manage_settings, do_manage_notes,
         do_manage_calendar,
@@ -572,10 +549,8 @@ async def _execute_tool_block_impl(
         do_list_downloads, do_cancel_download, do_search_hf_models, do_list_cached_models,
         do_list_serve_presets, do_serve_preset, do_adopt_served_model,
         do_list_cookbook_servers,
-        do_edit_image, do_trigger_research, do_manage_research, do_resolve_contact,
+        do_resolve_contact,
         do_manage_contact,
-        do_vault_search, do_vault_get, do_vault_unlock,
-        do_app_api,
     )
 
     tool = block.tool_type
@@ -777,37 +752,22 @@ async def _execute_tool_block_impl(
     elif tool == "search_chats":
         query = content.split("\n")[0].strip()
         desc = f"search_chats: {query[:80]}"
-        result = await do_search_chats(query, owner=owner)
-    elif tool in ("chat_with_model", "ask_teacher", "list_models"):
-        # Migrated to the agent_tools registry (#3629): dispatched through
-        # TOOL_HANDLERS with the owner/session ctx these tools need, instead
-        # of the legacy dispatch_ai_tool elif. The impls live in
-        # src/agent_tools/model_interaction_tools.py.
-        first_line = content.split(chr(10))[0].strip()[:60]
-        desc = f"{tool}: {first_line}" if first_line else tool
-        result = await _document_tool_dispatch(tool, content, session_id, owner) \
-            or {"error": f"{tool}: execution failed", "exit_code": 1}
-    elif tool in ("create_session", "list_sessions", "send_to_session", "manage_session"):
-        # Migrated to the agent_tools registry (#3629): dispatched through
-        # TOOL_HANDLERS with the owner/session ctx these tools need. The impls
-        # live in src/agent_tools/session_tools.py.
-        first_line = content.split(chr(10))[0].strip()[:60]
-        desc = f"{tool}: {first_line}" if first_line else tool
-        result = await _document_tool_dispatch(tool, content, session_id, owner) \
-            or {"error": f"{tool}: execution failed", "exit_code": 1}
-    elif tool in ("pipeline", "manage_memory", "ui_control"):
+        from src.agent_tools import TOOL_HANDLERS
+        result = await TOOL_HANDLERS[tool](content, {"session_id": session_id, "owner": owner})
+    elif tool in ("chat_with_model", "create_session", "list_sessions",
+                  "send_to_session",
+                  "manage_session", "list_models",
+                  "ask_teacher"):
         from src.ai_interaction import dispatch_ai_tool
         desc, result = await dispatch_ai_tool(tool, content, session_id, owner=owner)
-    elif tool == "manage_tasks":
-        desc = "manage_tasks"
-        result = await do_manage_tasks(content, owner=owner)
-    elif tool == "manage_skills":
-        desc = "manage_skills"
-        result = await do_manage_skills(content, owner=owner)
-    elif tool == "api_call":
-        first_line = content.split("\n")[0].strip()[:60]
-        desc = f"api_call: {first_line}"
-        result = await do_api_call(content)
+    elif tool in ("manage_tasks", "manage_skills", "manage_memory",
+                  "manage_rag", "pipeline", "ui_control",
+                  "trigger_research", "manage_research",
+                  "api_call", "app_api",
+                  "edit_image"):
+        desc = tool
+        from src.agent_tools import TOOL_HANDLERS
+        result = await TOOL_HANDLERS[tool](content, {"session_id": session_id, "owner": owner})
     elif tool == "manage_endpoints":
         desc = "manage_endpoints"
         result = await do_manage_endpoints(content, owner=owner)
@@ -856,9 +816,6 @@ async def _execute_tool_block_impl(
     elif tool == "list_cached_models":
         desc = "list_cached_models"
         result = await do_list_cached_models(content, owner=owner)
-    elif tool == "app_api":
-        desc = "app_api"
-        result = await do_app_api(content, owner=owner)
     elif tool == "list_serve_presets":
         desc = "list_serve_presets"
         result = await do_list_serve_presets(content, owner=owner)
@@ -871,33 +828,19 @@ async def _execute_tool_block_impl(
     elif tool == "list_cookbook_servers":
         desc = "list_cookbook_servers"
         result = await do_list_cookbook_servers(content, owner=owner)
-    elif tool == "edit_image":
-        desc = "edit_image"
-        result = await do_edit_image(content, owner=owner)
     elif tool == "edit_file":
         result = await _direct_fallback(tool, content) or {"error": "edit failed", "exit_code": 1}
         desc = result.get("output") or result.get("error") or "edit_file"
-    elif tool == "trigger_research":
-        desc = "trigger_research"
-        result = await do_trigger_research(content, owner=owner)
-    elif tool == "manage_research":
-        desc = "manage_research"
-        result = await do_manage_research(content, owner=owner)
     elif tool == "resolve_contact":
         desc = "resolve_contact"
         result = await do_resolve_contact(content, owner=owner)
     elif tool == "manage_contact":
         desc = "manage_contact"
         result = await do_manage_contact(content, owner=owner)
-    elif tool == "vault_search":
-        desc = "vault_search"
-        result = await do_vault_search(content, owner=owner)
-    elif tool == "vault_get":
-        desc = "vault_get"
-        result = await do_vault_get(content, owner=owner)
-    elif tool == "vault_unlock":
-        desc = "vault_unlock"
-        result = await do_vault_unlock(content, owner=owner)
+    elif tool in ("vault_search", "vault_get", "vault_unlock"):
+        desc = tool
+        from src.agent_tools import TOOL_HANDLERS
+        result = await TOOL_HANDLERS[tool](content, {"session_id": session_id, "owner": owner})
     elif tool.startswith("mcp__"):
         # MCP tool dispatch
         mcp = get_mcp_manager()
