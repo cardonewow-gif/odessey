@@ -107,7 +107,7 @@ class ModelDiscovery:
 
         def _append_env_hosts(out: List[str]) -> None:
             """Add hosts (and any custom ports) from provider-specific env vars."""
-            for env_name in ("OLLAMA_BASE_URL", "OLLAMA_URL", "LM_STUDIO_URL"):
+            for env_name in ("OLLAMA_BASE_URL", "OLLAMA_URL", "LM_STUDIO_URL", "FASTFLOWLM_URL"):
                 raw = os.getenv(env_name, "").strip()
                 if not raw:
                     continue
@@ -196,8 +196,9 @@ class ModelDiscovery:
 
         # Well-known ports: 8000-8020 (vLLM, llama.cpp, SGLang, Cookbook),
         # 1234 (LM Studio), 11434 (Ollama), 11435 for APFEL as its default port is
-        # occupied by Ollama. The env vars can add more ports which will be merged in.
-        ports = list(range(8000, 8021)) + [1234, 11434, 11435]
+        # occupied by Ollama, 52625 (FastFlowLM — Ryzen AI NPU runtime).
+        # The env vars can add more ports which will be merged in.
+        ports = list(range(8000, 8021)) + [1234, 11434, 11435, 52625]
         ports += [p for p in sorted(self._extra_ports) if p not in ports]
         targets = [(h, p) for h in hosts for p in ports]
 
