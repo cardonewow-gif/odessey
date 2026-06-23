@@ -25,6 +25,7 @@ from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocument
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool
 from .bg_job_tools import ManageBgJobsTool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
+from .git_tools import GitTool, ForgeTool
 
 TOOL_HANDLERS = {
     "bash": BashTool().execute,
@@ -51,6 +52,8 @@ TOOL_HANDLERS = {
     "list_sessions": ListSessionsTool().execute,
     "send_to_session": SendToSessionTool().execute,
     "manage_session": ManageSessionTool().execute,
+    "git": GitTool().execute,
+    "forge": ForgeTool().execute,
 }
 
 # ---------------------------------------------------------------------------
@@ -90,6 +93,8 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "search_hf_models", "list_cached_models",
              "list_serve_presets", "serve_preset", "adopt_served_model",
              "list_cookbook_servers",
+             # Workspace-confined version-control tools.
+             "git", "forge",
              # Other tools the agent reaches for that were also missing.
              "edit_image", "trigger_research", "manage_research",
              # Generic loopback to any UI-button endpoint (cookbook,

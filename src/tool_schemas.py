@@ -1203,6 +1203,34 @@ FUNCTION_TOOL_SCHEMAS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "git",
+            "description": "Run a git command in the active workspace (the repo). Use for version control: status, diff, log, show, branch, add, commit, checkout/switch, restore, reset, stash, merge, rebase, push, pull, fetch. PREFER this over `bash git` - confined to the workspace, structured. Requires a workspace. Commits get an agent identity automatically. Not allowed: config/clone/daemon, remote mutation (only read-only `remote`/`-v`/`show`/`get-url`), `init` with a target path, path-redirecting options (-C/--git-dir/--work-tree/--separate-git-dir/--output/--no-index), and unsafe network forms (only `push [-u] origin <branch>` and flag-light `fetch`/`pull` from plain `origin`, no refspecs or `--all`, are allowed).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The git subcommand + args, e.g. 'status', 'diff HEAD', 'add -A', 'commit -m \"msg\"', 'checkout -b feature', 'push -u origin HEAD'"}
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "forge",
+            "description": "Run a READ-ONLY GitHub/GitLab CLI query in the active workspace to inspect pull/merge requests, issues, and releases. Auto-detects `gh` (GitHub) or `glab` (GitLab) from the repo's remote; say `pr ...` either way (mapped to `mr` for GitLab). Allowed subcommands: list, view, status, diff, checks - e.g. 'pr list', 'pr view 12', 'pr checks', 'issue list', 'issue view 5', 'repo view'. Returns a clear message if no forge CLI is installed/authenticated. Requires a workspace. Mutating actions (create/comment/close/edit/review/merge/delete) are not available yet - they will return behind a confirmation/intent gate.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "A read-only forge query, e.g. 'pr list', 'pr view 12', 'issue view 5', 'repo view'"}
+                },
+                "required": ["command"]
+            }
+        }
+    },
 ]
 
 
@@ -1274,6 +1302,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = args.get("path", "")
     elif tool_type in ("grep", "glob", "ls"):
         content = json.dumps(args) if args else "{}"
+    elif tool_type in ("git", "forge"):
+        content = args.get("command", "")
     elif tool_type == "get_workspace":
         content = ""
     elif tool_type == "write_file":
