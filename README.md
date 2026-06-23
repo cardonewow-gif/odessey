@@ -61,6 +61,10 @@ Help is welcome. The best entry points are fresh-install testing, provider setup
 
 Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
 
+## Troubleshooting
+
+- **Uploaded PDF shows "processed but no readable content found"** in chat, or the document viewer says **"PDF viewer requires PyMuPDF"**: see [docs/pdf-vl-fallback.md](docs/pdf-vl-fallback.md) for the diagnosis and the install/fix path.
+
 ## Star History
 
 <a href="https://www.star-history.com/?repos=pewdiepie-archdaemon%2Fodysseus&type=date&legend=top-left">
