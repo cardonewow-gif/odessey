@@ -1,8 +1,12 @@
 # Optional dependencies — install only if you use the corresponding feature.
 # The app handles their absence gracefully (clear error message on first use).
 #
-# Note: chromadb-client + fastembed moved to requirements.txt — RAG, semantic
-# memory, and tool selection are core paths, so they ship by default now.
+# Note: chromadb-client + fastembed moved to requirements.txt —
+# RAG, semantic memory, and tool selection are core paths, so they ship by default now.
+
+# Qdrant vector store backend (alternative to the default ChromaDB).
+# Install if you set VECTOR_STORE=qdrant in your .env.
+qdrant-client
 
 # Local speech-to-text (microphone -> text) via faster-whisper, for the
 # "local" STT provider. Runs on CPU out of the box (CTranslate2 backend, no

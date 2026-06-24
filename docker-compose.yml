@@ -1,6 +1,9 @@
 services:
   odysseus:
-    build: .
+    build:
+      context: .
+      args:
+        INSTALL_OPTIONAL: ${INSTALL_OPTIONAL:-false}
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
     volumes:
@@ -39,8 +42,11 @@ services:
       - HF_TOKEN=${HF_TOKEN:-}
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
       - SEARXNG_INSTANCE=http://searxng:8080
+      - VECTOR_STORE=${VECTOR_STORE:-chroma}
       - CHROMADB_HOST=chromadb
       - CHROMADB_PORT=8000
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
       - DATABASE_URL=${DATABASE_URL:-sqlite:///./data/app.db}
       - AUTH_ENABLED=${AUTH_ENABLED:-true}
       - LOCALHOST_BYPASS=${LOCALHOST_BYPASS:-false}
@@ -95,6 +101,15 @@ services:
       - chromadb-data:/chroma/chroma
     environment:
       - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+
+  qdrant:
+    image: docker.io/qdrant/qdrant:latest
+    profiles: [qdrant]
+    ports:
+      - "${QDRANT_BIND:-127.0.0.1}:6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
     restart: unless-stopped
 
   searxng:
@@ -161,4 +176,5 @@ services:
 volumes:
   searxng-data:
   chromadb-data:
+  qdrant-data:
   ntfy-cache:

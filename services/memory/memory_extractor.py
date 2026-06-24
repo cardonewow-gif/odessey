@@ -404,7 +404,7 @@ async def extract_and_store(
                 continue
 
             # Dedup: check vector similarity first (fast), then exact text match.
-            # A runtime embedding/ChromaDB failure (backend OOM, model evicted,
+            # A runtime embedding/vector store failure (backend OOM, model evicted,
             # remote endpoint down) must not abort the whole batch — fall through
             # to the text/fuzzy dedup below instead of losing every validated
             # fact extracted this session. (`.healthy` is only set at init, so

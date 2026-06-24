@@ -9,7 +9,7 @@ requests (the reporter's was "visit <url> and tell me the title"), so email tool
 were force-included for non-email queries.
 
 These hints are deterministic string matching — no embeddings — so we can test
-`get_tools_for_query` directly with retrieval stubbed out (no ChromaDB needed).
+`get_tools_for_query` directly with retrieval stubbed out (no vector store needed).
 """
 
 from src.tool_index import ToolIndex, ALWAYS_AVAILABLE
@@ -23,7 +23,7 @@ _EMAIL_TOOLS = {
 def _index_without_embeddings():
     """A ToolIndex whose retrieval returns nothing, so get_tools_for_query
     exercises only the deterministic base + keyword-hint logic."""
-    ti = ToolIndex.__new__(ToolIndex)        # skip __init__ (no ChromaDB/fastembed)
+    ti = ToolIndex.__new__(ToolIndex)        # skip __init__ (no vector store/fastembed)
     ti.retrieve = lambda query, k=8: []
     return ti
 

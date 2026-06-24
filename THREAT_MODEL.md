@@ -9,7 +9,7 @@ Odysseus is designed for **trusted users on a private network**, not public expo
 - Unauthenticated access
 - Non-admins reaching admin-only capabilities
 - The AI agent acting on instructions injected through untrusted content (web results, emails, fetched pages, memories)
-- Internal services (ChromaDB, Ollama, SearXNG, etc.) being reachable from outside the host
+- Internal services (ChromaDB, Qdrant, Ollama, SearXNG, etc.) being reachable from outside the host
 
 ## Roles and Capabilities
 

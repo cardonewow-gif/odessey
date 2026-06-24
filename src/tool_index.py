@@ -2,7 +2,7 @@
 RAG-based tool selection for agent mode.
 
 Instead of injecting all tool descriptions into the system prompt,
-embed them in a ChromaDB collection and retrieve only the top-K
+embed them in a vector collection and retrieve only the top-K
 relevant ones per user message.
 """
 
@@ -10,7 +10,10 @@ import logging
 import hashlib
 import re
 import time
-from typing import Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
+
+if TYPE_CHECKING:
+    from src.vector_store import VectorCollection
 
 from src.embedding_lanes import (
     LANE_CUSTOM,
@@ -140,7 +143,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
 
 
 class ToolIndex:
-    """ChromaDB-backed tool index for RAG-based tool selection."""
+    """Vector store-backed tool index for RAG-based tool selection."""
 
     def __init__(self):
         self._lanes = build_embedding_lanes(COLLECTION_NAME)

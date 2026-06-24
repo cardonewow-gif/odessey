@@ -322,10 +322,15 @@ def setup_embedding_routes():
         except Exception:
             pass
 
-        # Reset ChromaDB client (collections will be recreated with new embeddings)
+        # Reset vector store clients (collections will be recreated with new embeddings)
         try:
             from src.chroma_client import reset_client
             reset_client()
+        except Exception:
+            pass
+        try:
+            from src.qdrant_store import reset_qdrant_client
+            reset_qdrant_client()
         except Exception:
             pass
 
@@ -363,10 +368,15 @@ def setup_embedding_routes():
         except Exception:
             pass
 
-        # Reset ChromaDB client
+        # Reset vector store clients
         try:
             from src.chroma_client import reset_client
             reset_client()
+        except Exception:
+            pass
+        try:
+            from src.qdrant_store import reset_qdrant_client
+            reset_qdrant_client()
         except Exception:
             pass
 

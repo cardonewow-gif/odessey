@@ -1,13 +1,16 @@
 """
 memory_vector.py
 
-ChromaDB-backed vector store for memory entries.
+Vector store for memory entries.
 Shares the EmbeddingClient with RAG to save memory.
-Stores pre-computed embeddings (ChromaDB does not manage embedding).
+Stores pre-computed embeddings supplied by the caller.
 """
 
 import logging
-from typing import List, Dict, Optional
+from typing import TYPE_CHECKING, List, Dict, Optional
+
+if TYPE_CHECKING:
+    from src.vector_store import VectorCollection
 
 from src.embedding_lanes import (
     LANE_CUSTOM,
@@ -29,7 +32,7 @@ class MemoryVectorStore:
 
     def __init__(self, data_dir: str, embedding_model=None):
         self._model = embedding_model
-        self._collection = None
+        self._collection: Optional["VectorCollection"] = None
         self._lanes = []
         self._healthy = False
 
@@ -133,7 +136,7 @@ class MemoryVectorStore:
         """Search for the most relevant memory IDs by semantic similarity.
         Returns list of {"memory_id": str, "score": float}.
 
-        ChromaDB cosine distance = 1 - cosine_similarity.
+        cosine distance = 1 - cosine_similarity.
         We convert back: similarity = 1.0 - distance.
         """
         if not self._healthy or self.count() == 0:
@@ -191,21 +194,14 @@ class MemoryVectorStore:
         if not self._healthy:
             return
 
-        from src.chroma_client import get_chroma_client
+        from src.vector_store import delete_vector_collection
 
-        client = get_chroma_client()
-        lane_names = [
+        for name in (
             self.COLLECTION_NAME,
             collection_name(self.COLLECTION_NAME, LANE_CUSTOM),
             collection_name(self.COLLECTION_NAME, LANE_FASTEMBED),
-        ]
-        for name in lane_names:
-            try:
-                client.delete_collection(name)
-            except Exception:
-                pass
-        # Explicit rebuilds must start from the supplied memory list, so clear
-        # legacy unsuffixed collections too.
+        ):
+            delete_vector_collection(name)
         self._lanes = build_embedding_lanes(self.COLLECTION_NAME)
         self._collection = next(
             (lane.collection for lane in self._lanes if lane.name == LANE_FASTEMBED),

@@ -2,8 +2,8 @@
 embedding_lanes.py
 
 Helpers for keeping FastEmbed fallback vectors separate from user-configured
-embedding vectors. ChromaDB fixes a collection's dimension on first insert, so
-different embedding models must never share one collection.
+embedding vectors. Vector store backends fix a collection's dimension on first
+insert, so different embedding models must never share one collection.
 """
 
 from __future__ import annotations
@@ -133,7 +133,15 @@ def _encode_with_client(client: Any, texts: Sequence[str]) -> List[List[float]]:
     return vecs.tolist() if hasattr(vecs, "tolist") else [list(v) for v in vecs]
 
 
-def _get_or_reset_collection(chroma_client, name: str, metadata: Dict[str, Any], client: Any):
+def _get_or_reset_collection(name: str, metadata: Dict[str, Any], client: Any):
+    from src.vector_store import get_vector_collection, vector_store_backend
+
+    if vector_store_backend() != "chroma":
+        return get_vector_collection(name, metadata=metadata)
+
+    from src.chroma_client import get_chroma_client
+
+    chroma_client = get_chroma_client()
     try:
         collection = chroma_client.get_collection(name)
     except Exception:
@@ -229,14 +237,14 @@ def _get_or_reset_collection(chroma_client, name: str, metadata: Dict[str, Any],
     return collection
 
 
-def _create_lane(chroma_client, base_name: str, lane_name: str, client: Any) -> EmbeddingLane:
+def _create_lane(base_name: str, lane_name: str, client: Any) -> EmbeddingLane:
     dimension = int(client.get_sentence_embedding_dimension())
     model = getattr(client, "model", "")
     url = getattr(client, "url", "")
     fp = _fingerprint(lane_name, url, model, dimension)
     name = collection_name(base_name, lane_name)
     metadata = _metadata(lane_name, url, model, dimension, fp)
-    collection = _get_or_reset_collection(chroma_client, name, metadata, client)
+    collection = _get_or_reset_collection(name, metadata, client)
     return EmbeddingLane(
         name=lane_name,
         client=client,
@@ -251,21 +259,18 @@ def _create_lane(chroma_client, base_name: str, lane_name: str, client: Any) -> 
 
 def build_embedding_lanes(base_name: str) -> List[EmbeddingLane]:
     """Return healthy lanes in retrieval preference order: custom, fastembed."""
-    from src.chroma_client import get_chroma_client
-
-    chroma_client = get_chroma_client()
     lanes: List[EmbeddingLane] = []
 
     try:
         custom = _build_custom_client()
         if custom is not None:
-            lanes.append(_create_lane(chroma_client, base_name, LANE_CUSTOM, custom))
+            lanes.append(_create_lane(base_name, LANE_CUSTOM, custom))
     except Exception as e:
         logger.warning("Custom embedding lane unavailable for %s: %s", base_name, e)
 
     try:
         fastembed = _build_fastembed_client()
-        lanes.append(_create_lane(chroma_client, base_name, LANE_FASTEMBED, fastembed))
+        lanes.append(_create_lane(base_name, LANE_FASTEMBED, fastembed))
     except Exception as e:
         logger.warning("FastEmbed lane unavailable for %s: %s", base_name, e)
 

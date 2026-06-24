@@ -1,7 +1,7 @@
 """
 rag_vector.py
 
-Vector-based RAG using ChromaDB for storage and API-based embeddings.
+Vector-based RAG using a pluggable vector store (Chroma or Qdrant) with API-based embeddings.
 Features: persistent storage, hybrid search (vector + keyword), sentence-aware chunking,
 configurable embedding endpoint via EMBEDDING_URL env var.
 """
@@ -11,9 +11,12 @@ import hashlib
 import re
 import logging
 import numpy as np
-from typing import List, Dict, Any, Optional, Set
+from typing import TYPE_CHECKING, List, Dict, Any, Optional, Set
 
 from src.constants import CHROMA_DIR
+
+if TYPE_CHECKING:
+    from src.vector_store import VectorCollection
 from pathlib import Path
 
 from src.embedding_lanes import (
@@ -68,11 +71,11 @@ def _rewrite_owner_path(value: str, path_map: Dict[str, str], path_prefixes: Lis
 
 
 class VectorRAG:
-    """RAG system using ChromaDB vector storage with hybrid search."""
+    """RAG system using vector storage with hybrid search."""
 
     def __init__(self, persist_directory: str = CHROMA_DIR):
         self.persist_directory = persist_directory
-        self._collection = None
+        self._collection: Optional["VectorCollection"] = None
         self._model = None
         self._lanes = []
         self._healthy = False
@@ -125,7 +128,7 @@ class VectorRAG:
 
     @property
     def collection(self):
-        """Expose the ChromaDB collection for direct access by personal_routes etc."""
+        """Expose the vector collection for direct access by personal_routes etc."""
         return self._collection
 
     def _active_collections(self):
@@ -439,22 +442,14 @@ class VectorRAG:
 
     def rebuild_index(self) -> bool:
         try:
-            from src.chroma_client import get_chroma_client
-            client = get_chroma_client()
-            try:
-                client.delete_collection(COLLECTION_NAME)
-            except Exception:
-                pass
+            from src.vector_store import delete_vector_collection
+
             for name in (
+                COLLECTION_NAME,
                 collection_name(COLLECTION_NAME, LANE_CUSTOM),
                 collection_name(COLLECTION_NAME, LANE_FASTEMBED),
             ):
-                try:
-                    client.delete_collection(name)
-                except Exception:
-                    pass
-            # Rebuild means empty current lanes. Clear the legacy unsuffixed
-            # collection too so startup migration cannot resurrect stale docs.
+                delete_vector_collection(name)
             self._lanes = build_embedding_lanes(COLLECTION_NAME)
             self._collection = next(
                 (lane.collection for lane in self._lanes if lane.name == LANE_FASTEMBED),
@@ -547,8 +542,8 @@ class VectorRAG:
         """Remove all chunks under ``directory`` (recursively), and nothing else.
 
         Selection is a Python-side path-boundary match on each chunk's stored
-        ``source`` full path, NOT a Chroma metadata ``where`` filter. No Chroma
-        metadata operator selects a scalar string by path prefix (``$contains``
+        ``source`` full path, NOT a ``where`` filter. No vector-store metadata
+        operator selects a scalar string by path prefix (``$contains``
         targets document content / list membership, not a ``source`` substring),
         and a plain substring would over-delete siblings — removing ``/docs``
         must not touch ``/docs2`` or ``/docs_personal``. We therefore match
