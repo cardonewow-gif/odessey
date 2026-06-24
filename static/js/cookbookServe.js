@@ -7,7 +7,7 @@
 import uiModule from './ui.js';
 import spinnerModule from './spinner.js';
 import { providerLogo } from './providers.js';
-import { modelColor } from './chatRenderer.js';
+import { modelColor } from './model/models.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 import { openCookbookDependencies } from './cookbook-diagnosis.js';
 import { _hwfitCache } from './cookbook-hwfit.js';
@@ -3655,7 +3655,7 @@ export async function _fetchCachedModels() {
     const data = await res.json();
     _dlWp.destroy();
 
-    // CHANGELOG: 'ready' already excludes partial downloads; 
+    // CHANGELOG: 'ready' already excludes partial downloads;
     // show every complete model regardless of size/backend.
     const ready = data.models.filter(m => m.status === 'ready');
 
