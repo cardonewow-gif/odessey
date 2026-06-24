@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 from src.llm_core import stream_llm, stream_llm_with_fallback, _is_ollama_native_url
 from src.model_context import estimate_tokens
+from src.context_compactor import SMALL_CONTEXT_LIMIT
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
@@ -37,6 +38,17 @@ from src.agent_tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _tool_limit_for_context(context_length: int) -> int:
+    """Max RAG tools to retrieve, scaled down for small context windows."""
+    if context_length <= 0 or context_length > 16384:
+        return 8
+    if context_length <= 4096:
+        return 3
+    if context_length <= 8192:
+        return 5
+    return 6  # 8192 < context_length <= 16384
 
 
 def _load_mcp_disabled_map() -> Dict[str, set]:
@@ -1065,6 +1077,9 @@ def _build_system_prompt(
     # the trusted system role. Bound up front so the insert block below can
     # always check it.
     _skills_message = None
+    _email_style_message = None
+    _integ_message = None
+    _mcp_desc_message = None
     if active_document:
         set_active_document(active_document.id)
         _doc_raw = active_document.current_content or ""
@@ -1273,9 +1288,9 @@ def _build_system_prompt(
             from src.settings import load_settings as _load_settings
             _style = (_load_settings().get("email_writing_style", "") or "").strip()
             if _style:
+                # Hardcoded identity/style rules stay in the trusted system prompt.
                 agent_prompt += (
-                    "\n\n📧 EMAIL WRITING STYLE AND IDENTITY — FOLLOW FOR ANY EMAIL DRAFT OR SEND:\n"
-                    f"{_style}\n\n"
+                    "\n\n"
                     "Hard identity rule: write as the user/mailbox owner only. Do not sign as, speak as, "
                     "or imply you are the recipient, original sender, quoted sender, spouse, assistant, "
                     "company, or any other third party. If a signature is needed, use only the name/signature "
@@ -1283,6 +1298,12 @@ def _build_system_prompt(
                     "Mechanical style rules: never use em dash/en dash; use --. Never use curly apostrophes. "
                     "For English emails, default to Hi [Name] or Hiya from the saved style rather than Hey. "
                     "If the saved style specifies Best/newline/name, use that sign-off when a sign-off is natural."
+                )
+                # User-editable style text is untrusted — wrap it so a malicious
+                # style value cannot inject system-role instructions.
+                _email_style_message = untrusted_context_message(
+                    "email writing style",
+                    "EMAIL WRITING STYLE AND IDENTITY — FOLLOW FOR ANY EMAIL DRAFT OR SEND:\n" + _style,
                 )
         except Exception:
             pass
@@ -1411,6 +1432,25 @@ def _build_system_prompt(
         except Exception as _sk_err:
             logger.debug(f"skill injection failed (non-fatal): {_sk_err}")
 
+    # Integration descriptions — user-editable fields, must not be in system role.
+    if not suppress_local_context:
+        try:
+            from src.integrations import get_integrations_prompt
+            _integ_prompt = get_integrations_prompt()
+            if _integ_prompt:
+                _integ_message = untrusted_context_message("integrations", _integ_prompt)
+        except Exception as _integ_err:
+            logger.debug(f"Integration prompt injection skipped: {_integ_err}")
+
+    # MCP tool descriptions — sourced from external servers, must not be in system role.
+    if mcp_mgr:
+        try:
+            _mcp_desc = mcp_mgr.get_tool_descriptions_for_prompt(mcp_disabled_map or {})
+            if _mcp_desc:
+                _mcp_desc_message = untrusted_context_message("MCP tools", _mcp_desc)
+        except Exception as _mcp_err:
+            logger.debug(f"MCP description injection skipped: {_mcp_err}")
+
     agent_msg = {"role": "system", "content": agent_prompt}
     insert_idx = 0
     for i, msg in enumerate(messages):
@@ -1449,6 +1489,15 @@ def _build_system_prompt(
         last_user_idx += 1  # the document message is now at last_user_idx
     if _email_message:
         merged.insert(last_user_idx, _email_message)
+        last_user_idx += 1
+    if _email_style_message:
+        merged.insert(last_user_idx, _email_style_message)
+        last_user_idx += 1
+    if _integ_message:
+        merged.insert(last_user_idx, _integ_message)
+        last_user_idx += 1
+    if _mcp_desc_message:
+        merged.insert(last_user_idx, _mcp_desc_message)
         last_user_idx += 1
     if _skills_message:
         merged.insert(last_user_idx, _skills_message)
@@ -1555,19 +1604,6 @@ def _build_base_prompt(
         except Exception as _e:
             # Skill index is a soft enhancement — never fail prompt assembly on it.
             logger.debug(f"Skill-index injection skipped: {_e}")
-
-    # Inject integration descriptions
-    if not suppress_local_context:
-        from src.integrations import get_integrations_prompt
-        integ_prompt = get_integrations_prompt()
-        if integ_prompt:
-            agent_prompt += "\n\n" + integ_prompt
-
-    # Inject MCP tool descriptions
-    if mcp_mgr:
-        mcp_desc = mcp_mgr.get_tool_descriptions_for_prompt(mcp_disabled_map or {})
-        if mcp_desc:
-            agent_prompt += mcp_desc
 
     return agent_prompt, skill_index_block
 
@@ -2145,7 +2181,7 @@ async def stream_agent_loop(
                 if _retrieval_query:
                     try:
                         _relevant_tools = await asyncio.wait_for(
-                            asyncio.to_thread(tool_idx.get_tools_for_query, _retrieval_query, 8),
+                            asyncio.to_thread(tool_idx.get_tools_for_query, _retrieval_query, _tool_limit_for_context(context_length)),
                             timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
                         )
                         logger.info(f"[tool-rag] Retrieved tools for query: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
@@ -2323,7 +2359,10 @@ async def stream_agent_loop(
         _is_api_model = False
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
-    _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat
+    _compact_agent_prompt = (
+        _is_api_model or _is_ollama_native or _ollama_openai_compat
+        or (0 < context_length <= SMALL_CONTEXT_LIMIT)
+    )
     messages, mcp_schemas = _build_system_prompt(
         messages, model, active_document, mcp_mgr, disabled_tools,
         needs_admin=_needs_admin, relevant_tools=_relevant_tools,
@@ -2331,7 +2370,7 @@ async def stream_agent_loop(
         compact=_compact_agent_prompt,
         owner=owner,
         suppress_local_context=guide_only,
-        suppress_skills=_low_signal_turn,
+        suppress_skills=_low_signal_turn or (0 < context_length <= 4096),
         active_email=active_email,
     )
     if plan_mode and not guide_only:
