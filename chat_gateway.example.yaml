@@ -1,0 +1,77 @@
+# Odysseus Chat Gateway config.
+# Copy to data/chat_gateway.yaml and edit. The gateway does nothing until
+# `enabled: true` AND at least one platform is enabled.
+
+enabled: false
+
+# Which Odysseus user the agent acts as: owns the sessions, model endpoints,
+# memory, and tools the gateway agent uses. Must be an existing Odysseus user.
+# STRONGLY prefer a DEDICATED NON-ADMIN user: a non-admin owner is automatically
+# restricted to the public-user toolset (no bash/python/file/email/memory).
+owner: your-odysseus-username
+
+# Safety guard. If `owner` is an admin, or auth is disabled (single-user mode),
+# the gateway forces the public-user toolset (no host execution, MCP off) because
+# an externally reachable bot must not be able to run code on the host. Set this
+# to true ONLY if you deliberately want the bot to have full admin tools.
+allow_privileged_owner: false
+
+platforms:
+  mattermost:
+    enabled: false
+    base_url: https://mattermost.example.com
+    token: ${MATTERMOST_BOT_TOKEN}     # bot account access token (env-expanded)
+    verify_tls: true                   # set false only for self-signed certs
+    require_mention: true              # in channels, only respond when @mentioned (DMs always answered)
+    channels: []                       # [] = any channel the bot is in; or list channel IDs to restrict
+    free_response_channels: []         # channel IDs that reply WITHOUT a mention (interactive channels)
+    # model: ""                        # optional: pin a model; default = owner's first enabled endpoint
+    toolsets:
+      mode: all                        # all | allow | deny
+      allow: []                        # mode=allow: ONLY these tools are callable; all others are
+                                       #   disabled and MCP is off unless an mcp__ tool is listed
+      deny: []                         # mode=deny: block these (e.g. ["bash","python"])
+
+  # ── Matrix (self-hosted Synapse/Dendrite/Conduit) ──
+  matrix:
+    enabled: false
+    base_url: https://matrix.example.com     # homeserver base URL
+    token: ${MATRIX_ACCESS_TOKEN}            # bot user access token
+    verify_tls: true
+    auto_join: true                          # join rooms when the bot is invited
+    require_mention: true                    # @mention in rooms; DMs always answered
+    channels: []                             # [] = any joined room; or list room IDs
+    toolsets:
+      mode: all
+
+  # ── IRC (self-hosted ergo/InspIRCd) ──
+  irc:
+    enabled: false
+    host: irc.example.com
+    port: 6697
+    tls: true
+    verify_tls: true
+    nick: odysseus
+    # password: ${IRC_SERVER_PASSWORD}        # optional PASS
+    # nickserv_password: ${IRC_NICKSERV_PASSWORD}  # optional NickServ IDENTIFY
+    require_mention: true                      # "nick: msg" in channels; DMs always answered
+    channels: ["#odysseus"]                    # channels to join
+    toolsets:
+      mode: all
+
+  # ── SimpleX Chat (privacy-first; drives a local simplex-chat CLI) ──
+  # Run the CLI as a websocket server first:  simplex-chat -p 5225
+  simplex:
+    enabled: false
+    ws_url: ws://127.0.0.1:5225      # the simplex-chat CLI websocket
+    auto_accept: true                # auto-accept incoming contact requests
+    require_mention: true            # groups need a mention; direct chats always answered
+    toolsets:
+      mode: all
+
+  # Third-party / cloud platforms (Telegram, Discord, Slack, Teams, WhatsApp,
+  # Signal, ...) are not self-hosted; copy adapters/_skeleton.py to add one.
+  # telegram:
+  #   enabled: false
+  #   token: ${TELEGRAM_BOT_TOKEN}
+  #   require_mention: false
