@@ -10,7 +10,7 @@ import uiModule from './ui.js';
 import sessionModule from './sessions.js';
 import chatRenderer from './chatRenderer.js';
 import chatStream from './chatStream.js';
-import { addAITTSButton } from './tts-ai.js';
+import { addAITTSButton, TTS_ICONS } from './tts-ai.js';
 import markdownModule from './markdown.js';
 import spinnerModule from './spinner.js';
 import presetsModule from './presets.js';
@@ -2646,10 +2646,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         if (accumulated && window.aiTTSManager && window.aiTTSManager.autoPlay) {
           const ttsBtn = holder.querySelector('.ai-tts-button');
           if (ttsBtn) {
-            var ICON_PLAY_TTS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6 3 20 12 6 21 6 3"/></svg>';
-            var ICON_STOP_TTS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>';
             const resetFn = () => {
-              ttsBtn.innerHTML = ICON_PLAY_TTS;
+              ttsBtn.innerHTML = TTS_ICONS.speaker;
               ttsBtn.classList.remove('playing', 'loading');
               ttsBtn.style.color = '#6b7280';
               ttsBtn.title = 'Read aloud';
@@ -2658,12 +2656,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               // Flush remaining partial sentence and attach the real button
               window.aiTTSManager.streamingEnd(accumulated);
               window.aiTTSManager.streamingAttachButton(ttsBtn, resetFn);
-              // If still playing sentences from the stream, show stop icon
-              if (window.aiTTSManager.isPlaying || window.aiTTSManager._processing) {
-                ttsBtn.innerHTML = ICON_STOP_TTS;
-                ttsBtn.classList.add('playing');
-                ttsBtn.style.color = '#ccc';
-                ttsBtn.title = 'Stop';
+              // Sync icon with the real playback session (may already be loading/playing)
+              const mgr = window.aiTTSManager;
+              const pb = mgr._playback;
+              if (pb && pb.button === ttsBtn && pb.state !== 'idle') {
+                mgr._applyButtonState(ttsBtn, pb.state);
               }
             } else {
               // Non-streaming fallback (autoPlay toggled mid-stream, etc.)
