@@ -1122,6 +1122,12 @@ export function openPanel() {
   _open = true;
   _editingId = null;
   _searchQuery = '';
+  // Same for bulk-select: the rebuilt pane renders the Select button ("Select")
+  // and bulk bar (hidden) fresh, but _renderNotes reads module-scope _selectMode,
+  // so a non-Esc close while in select mode would leave phantom checkboxes (and
+  // stale _selectedIds) on reopen and disable drag-reorder until Select is toggled.
+  _selectMode = false;
+  _selectedIds.clear();
   _clearViewedReminderGlows();
   _firedDotDismissedAt = Date.now();
   try { localStorage.setItem(REMINDER_DISMISSED_AT_KEY, String(_firedDotDismissedAt)); } catch {}
