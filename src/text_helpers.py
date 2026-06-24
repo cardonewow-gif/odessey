@@ -30,18 +30,24 @@ _THINK_OPEN_RE = re.compile(rf"<{_THINK_TAG_NAME}(?:\s+[^>]*)?>[\s\S]*$", re.IGN
 _THINK_ATTR_RE = re.compile(rf"<{_THINK_TAG_NAME}\s+[^>]*>", re.IGNORECASE)
 _THINK_ATTR_CLOSE_RE = re.compile(rf"</{_THINK_TAG_NAME}\s+[^>]*>", re.IGNORECASE)
 _GEMMA_THOUGHT_OPEN_RE = re.compile(r"<\|channel>thought\s*\n?[\s\S]*$", re.IGNORECASE)
-_GEMMA_RESPONSE_CHANNEL_RE = re.compile(
-    r"<\|channel>response\s*\n?([\s\S]*?)<channel\|>",
-    re.IGNORECASE,
-)
 _GEMMA_RESPONSE_OPEN_RE = re.compile(r"<\|channel>response\s*\n?", re.IGNORECASE)
 _GEMMA_CHANNEL_CLOSE_RE = re.compile(r"<channel\|>", re.IGNORECASE)
-_THOUGHT_TAG_OPEN_RE = re.compile(r"<thought(\s+[^>]*)?>", re.IGNORECASE)
+# `(\s[^>]*)?` not `(\s+[^>]*)?`: the original `\s+` overlapped `[^>]*` (both
+# match whitespace), so an opener with no `>` (e.g. `<thought ` + junk)
+# backtracks quadratically on untrusted model output. A single fixed `\s`
+# removes that ambiguity (linear) while still requiring a tag-name boundary
+# after `thought`, so `<thoughtful>`/`<thoughts>` are left alone. The capture is
+# byte-for-byte identical to the original for real `<thought ...>` openers.
+_THOUGHT_TAG_OPEN_RE = re.compile(r"<thought(\s[^>]*)?>", re.IGNORECASE)
 _THOUGHT_TAG_CLOSE_RE = re.compile(r"</thought>", re.IGNORECASE)
-_GEMMA_THOUGHT_CHANNEL_CAPTURE_RE = re.compile(
-    r"<\|channel>thought\s*\n?([\s\S]*?)<channel\|>\s*",
-    re.IGNORECASE,
-)
+# Gemma thought-channel delimiters, split for forward-only substitution
+# (_sub_delimited): the lazy `[\s\S]*?` between an opener and `<channel|>`
+# otherwise rescans to end-of-string from every opener when no closer is
+# reachable (O(n^2) on untrusted model output). The closer consumes the
+# trailing `\s*`, matching the original `<channel|>\s*`. The response channel
+# reuses _GEMMA_RESPONSE_OPEN_RE / _GEMMA_CHANNEL_CLOSE_RE as opener/closer.
+_GEMMA_THOUGHT_CHANNEL_OPEN_RE = re.compile(r"<\|channel>thought\s*\n?", re.IGNORECASE)
+_GEMMA_CHANNEL_CLOSE_TRIM_RE = re.compile(r"<channel\|>\s*", re.IGNORECASE)
 # Qwen and a few other models prefix the response with a "Thinking Process:"
 # block before the real answer.
 _QWEN_THINKING_RE = re.compile(
@@ -93,6 +99,36 @@ def _strip_reasoning_prose(text: str) -> str:
     return "\n\n".join(keep).strip() if keep else text
 
 
+def _sub_delimited(text, open_re, close_re, repl):
+    """Forward-only equivalent of ``open_re([\\s\\S]*?)close_re`` ``re.sub(repl)``.
+
+    Pairs each opener with the first closer after it, then resumes past that
+    closer, and stops as soon as an opener has no reachable closer (no later
+    opener can have one either). That keeps it O(n) where ``re.sub`` retries
+    from every opener and rescans to end-of-string each time -> O(n^2) on
+    attacker-controlled "many openers, no closer" model output (CodeQL
+    py/polynomial-redos). ``repl`` receives the inner text (the lazy capture
+    group) and returns its replacement.
+
+    A whole-string "is a closer present?" guard is not enough: a stale closer
+    before an opener flood keeps it true while every opener still rescans.
+    """
+    out = []
+    pos = 0
+    while True:
+        om = open_re.search(text, pos)
+        if om is None:
+            break
+        cm = close_re.search(text, om.end())
+        if cm is None:
+            break
+        out.append(text[pos:om.start()])
+        out.append(repl(text[om.end():cm.start()]))
+        pos = cm.end()
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def normalize_thinking_markup(text: str) -> str:
     """Canonicalize supported thinking wrappers to `<think>` markup.
 
@@ -106,12 +142,18 @@ def normalize_thinking_markup(text: str) -> str:
     out = _THOUGHT_TAG_OPEN_RE.sub(lambda m: "<think" + (m.group(1) or "") + ">", text)
     out = _THOUGHT_TAG_CLOSE_RE.sub("</think>", out)
 
-    def _replace_gemma_thought(match: re.Match) -> str:
-        thought = match.group(1).strip()
+    def _replace_gemma_thought(inner: str) -> str:
+        thought = inner.strip()
         return f"<think>{thought}</think>\n" if thought else ""
 
-    out = _GEMMA_THOUGHT_CHANNEL_CAPTURE_RE.sub(_replace_gemma_thought, out)
-    out = _GEMMA_RESPONSE_CHANNEL_RE.sub(lambda m: m.group(1), out)
+    # Forward-only substitution so an unreachable/stale `<channel|>` can't drive
+    # the O(n^2) lazy-rescan on untrusted model output (ReDoS); see _sub_delimited.
+    out = _sub_delimited(
+        out, _GEMMA_THOUGHT_CHANNEL_OPEN_RE, _GEMMA_CHANNEL_CLOSE_TRIM_RE, _replace_gemma_thought
+    )
+    out = _sub_delimited(
+        out, _GEMMA_RESPONSE_OPEN_RE, _GEMMA_CHANNEL_CLOSE_RE, lambda inner: inner
+    )
     out = _GEMMA_RESPONSE_OPEN_RE.sub("", out)
     out = _GEMMA_CHANNEL_CLOSE_RE.sub("", out)
     return out
