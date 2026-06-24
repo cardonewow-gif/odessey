@@ -25,7 +25,7 @@ from core.middleware import INTERNAL_TOOL_USER  # noqa: E402
 DEFAULT_PRIVILEGES = {
     "can_use_agent": True,
     "can_use_browser": True,
-    "can_use_bash": False,
+    "can_use_bash": True,
     "can_use_documents": True,
     "can_use_research": True,
     "can_generate_images": True,
