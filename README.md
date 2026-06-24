@@ -61,6 +61,22 @@ Help is welcome. The best entry points are fresh-install testing, provider setup
 
 Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
 
+## Backup and restore
+
+Odysseus has **two different backup flows**:
+
+- **Export / Import Data (UI / JSON)** for user-level app state such as memories,
+  presets, skills, settings, feature flags, and preferences.
+- **`scripts/odysseus-backup`** for a full `data/` snapshot used in disaster
+  recovery or server migration.
+
+The **Settings → System → Data Backup** card is **not** a full `data/` snapshot.
+It does **not** replace backing up the SQLite DB, uploads, Chroma data, personal
+docs, attachments, or other files under `data/`.
+
+For the full backup/restore flow, command examples, and restore safety notes, see
+[`docs/backup-and-restore.md`](docs/backup-and-restore.md).
+
 ## Star History
 
 <a href="https://www.star-history.com/?repos=pewdiepie-archdaemon%2Fodysseus&type=date&legend=top-left">
