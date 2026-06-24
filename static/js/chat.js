@@ -3694,7 +3694,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     const editor = document.createElement('textarea');
     editor.className = 'edit-textarea';
     editor.value = currentText;
-    editor.rows = Math.max(2, currentText.split('\n').length);
+    editor.rows = Math.max(5, currentText.split('\n').length);
 
     const btnRow = document.createElement('div');
     btnRow.style.cssText = 'display:flex; gap:6px; margin-top:4px;';
@@ -4504,7 +4504,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     textarea.className = 'msg-edit-textarea';
     textarea.value = originalRaw;
     textarea.style.width = '100%';
-    textarea.style.minHeight = Math.max(100, body.offsetHeight) + 'px';
+    textarea.style.minHeight = Math.max(200, body.offsetHeight) + 'px';
     body.style.display = 'none';
     body.parentNode.insertBefore(textarea, body.nextSibling);
     textarea.focus();
