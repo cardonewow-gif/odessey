@@ -688,6 +688,14 @@ def test_llama_cpp_linux_bootstrap_uses_single_shell_continuations():
     assert not any(line.endswith("\\\\") for line in runner_lines)
 
 
+def test_llama_cpp_serve_bootstrap_clones_when_mount_dir_has_no_source():
+    routes_src = (Path(__file__).resolve().parents[1] / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
+
+    assert "[ -f llama.cpp/CMakeLists.txt ]" in routes_src
+    assert "git clone --depth 1 https://github.com/ggml-org/llama.cpp llama.cpp" in routes_src
+    assert "[ -d llama.cpp ] || git clone" not in routes_src
+
+
 def test_llama_cpp_linux_bootstrap_keeps_cpu_fallback_when_no_gpu_toolchain():
     runner_lines = []
     _append_llama_cpp_linux_accel_build_lines(runner_lines)
