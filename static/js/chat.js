@@ -567,6 +567,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     let _renderStream = () => {};
     let _cancelThinkingTimer = () => {};
     let _removeThinkingSpinner = () => {};
+    let _isAgent = null;
     let timeoutId = null;
     let responseTimeoutCleared = false;
     let clearResponseTimeout = () => {};
@@ -602,7 +603,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     // Reset tracking variables at start
     currentAccumulated = '';
     currentHolder = null;
-    
+
+    // Streaming TTS: synthesize sentence-by-sentence during streaming
+    let streamingTTS = null;
+
     try {
       // Re-enable auto-scroll when user sends a message
       uiModule.setAutoScroll(true);
@@ -863,7 +867,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       currentAbort = abortCtrl;
 
       const _tState = Storage.loadToggleState();
-      const _isAgent = (_tState.mode || 'chat') === 'agent';
+      _isAgent = (_tState.mode || 'chat') === 'agent';
 
       // Timeout: 6 min for research and agent mode, 3 min otherwise
       const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
@@ -1025,8 +1029,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let metrics = null;
       let isThinking = false;
       let thinkingStartTime = null;
-      // Streaming TTS: synthesize sentence-by-sentence during streaming
-      const streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
+      streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
       if (streamingTTS) window.aiTTSManager.streamingStart();
       // Multi-bubble agent tracking
       let roundHolder = holder;       // Current AI text bubble (changes per round)
@@ -2331,7 +2334,12 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // Agent wrote back to the plan (ticked a step / revised). Update
                 // the stored plan + live-refresh the docked plan window.
                 const _pu = (json.data && json.data.plan) ? json.data.plan : '';
-                if (_pu) _setStoredPlan(_pu);
+                /* - TODO:
+                 * //if (_pu) _setStoredPlan(_pu); 
+                 * "The plan write-back is now silently disabled rather than fixed.
+                 * Worth a tracked TODO/issue to actually wire plan persistence
+                 * ...plan_update event still arrives from the backend." #4549 
+		 */
 
               } else if (json.type === 'agent_step') {
                 if (_isBg) continue;
