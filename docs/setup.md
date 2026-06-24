@@ -331,7 +331,7 @@ uv pip sync requirements.lock                          # reproduce it exactly la
 ### Outlook / Office 365 email
 Odysseus email accounts currently use IMAP/SMTP username-password auth. Outlook
 and Microsoft 365 generally require OAuth instead, so normal Microsoft mailbox
-passwords will fail. See [docs/email-outlook.md](docs/email-outlook.md) for the
+passwords will fail. See [email-outlook.md](email-outlook.md) for the
 current limitation and the planned integration direction.
 
 ## Security Notes
@@ -435,4 +435,4 @@ All user data lives in `data/` (gitignored): `app.db` (sessions, messages, docum
 `memory.json`, `presets.json`, `uploads/`, `personal_docs/`, `chroma/`, `settings.json`.
 
 To back up or restore everything in `data/`, see the
-[Backup & Restore guide](docs/backup-restore.md).
+[Backup & Restore guide](backup-restore.md).
