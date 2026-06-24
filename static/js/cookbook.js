@@ -25,7 +25,7 @@ import {
 import {
   initDownload,
   _setPanelField, _setPanelCheckbox,
-  _wirePanelEvents, _runPanelCmd, _runModelDownload, _buildDownloadCmd,
+  _wirePanelEvents, _runPanelCmd, _runModelDownload, _buildDownloadCmd, _resolveDownloadScope,
 } from './cookbookDownload.js';
 
 import {
@@ -76,7 +76,7 @@ function _platformIcon(platform) {
   return '';
 }
 
-export let _envState = { env: 'none', envPath: '', hfToken: '', hfTokenConfigured: false, hfTokenMasked: '', gpus: '', remoteHost: '', servers: [], modelPaths: [], platform: '', defaultServer: '' };
+export let _envState = { env: 'none', envPath: '', hfToken: '', hfTokenConfigured: false, hfTokenMasked: '', gpus: '', remoteHost: '', servers: [], modelPaths: [], platform: '', defaultServer: '', cacheDir: '', useXet: false, _hfCacheDefault: '' };
 let _lastCacheHostVal = null;
 let _cookbookOpeningSpinners = [];
 export function _lastCacheHost() { return _lastCacheHostVal; }
@@ -653,31 +653,40 @@ export function _buildServeCmd(f, modelName, backend) {
       f.ngl = '99';
     }
     const _cpuOnly = String(f.ngl).trim() === '0';
-    // GGML_CUDA_* env vars are no-ops on Vulkan/ROCm/Metal/CPU. Only emit
-    // them when the detected backend is actually CUDA AND the hwfit scan
-    // was run against the currently-targeted host, so a saved preset
-    // from a prior NVIDIA target doesn't pollute a non-NVIDIA launch
-    // with misleading prefixes.
+    // GGML_CUDA_* vars are no-ops on Vulkan/ROCm/Metal/CPU — only emit them when
+    // the detected backend is actually CUDA AND the hwfit scan ran against the
+    // currently-targeted host (so a stale preset from a prior NVIDIA target
+    // doesn't pollute a non-NVIDIA launch). [from dev]
     const _sb = String(_hwfitCache?.system?.backend || '').toLowerCase();
     const _hwfitHost = String(_hwfitCache?._scannedHost || '');
     const _curHost = String(_envState.remoteHost || '');
     const _isCudaTarget = (_sb === 'cuda') && (_hwfitHost === _curHost);
+    // Local Windows runs the serve command through Git Bash (not PowerShell), so
+    // it takes the same `VAR=val cmd` bash env prefixes as POSIX. Only REMOTE
+    // Windows uses the PowerShell `$env:VAR=...;` form (its .ps1 runner). [ours]
+    const _remoteWin = _isWindows() && !!_envState.remoteHost;
     const lcPrefix = (() => {
       let p = '';
-      if (f.unified_mem && !_cpuOnly && !_isWindows() && _isCudaTarget) p += `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 `;
-      // No GPU env var in CPU mode — `-ngl 0` already disables offload
-      // so CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES would be misleading
-      // clutter ("why is CUDA pinned for a CPU run?").
-      if (!_isWindows() && !_cpuOnly) p += _gpuEnvPrefix(gpuId);
+      if (f.unified_mem && !_cpuOnly && !_remoteWin && _isCudaTarget) p += `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 `;
+      // GPU pin via the right var (CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES).
+      // No GPU env var in CPU mode — `-ngl 0` already disables offload, so a
+      // pin would be misleading clutter. Bash form covers POSIX + local Windows
+      // (Git Bash); remote Windows gets the PowerShell form below.
+      if (!_remoteWin && !_cpuOnly) p += _gpuEnvPrefix(gpuId);
       return p;
     })();
-    if (f.unified_mem && !_cpuOnly && _isWindows() && _isCudaTarget) cmd += `$env:GGML_CUDA_ENABLE_UNIFIED_MEMORY="1"; `;
-    if (_isWindows() && !_cpuOnly) cmd += _gpuEnvPrefix(gpuId, true);
+    if (f.unified_mem && !_cpuOnly && _remoteWin && _isCudaTarget) cmd += `$env:GGML_CUDA_ENABLE_UNIFIED_MEMORY="1"; `;
+    if (_remoteWin && !_cpuOnly) cmd += _gpuEnvPrefix(gpuId, true);
+    // When the GGUF path is a runtime `$({ find … })` resolver, hoist it into a
+    // fail-loud MODEL_FILE prelude (added below the command) so a no-match fails
+    // clearly instead of launching with `--model ""`. Remote Windows runs via a
+    // PowerShell runner that can't execute a bash prelude, so it embeds the
+    // expression directly. [dev's needsGgufPrelude + ours' remote-Win guard]
     const needsGgufPrelude = /^\$\(\{\s*find\s/.test(String(ggufPath || ''));
-    const modelArg = needsGgufPrelude ? '"$MODEL_FILE"' : `"${ggufPath}"`;
-    // Prefer native llama-server. The backend bootstrap resolves/builds the
-    // right binary (Vulkan/HIP/CUDA/Metal/CPU), so keep the generated command
-    // as a validator-safe binary + args with no shell chaining.
+    const modelArg = (needsGgufPrelude && !_remoteWin) ? '"$MODEL_FILE"' : `"${ggufPath}"`;
+    // Prefer the native llama-server binary — its minja templating renders modern
+    // GGUF chat templates that the Python bindings' Jinja2 rejects. Fall back to
+    // llama_cpp.server.
     // Don't suppress stderr — surface real errors (missing file, lib, OOM).
     // Optional perf/fit flags from a hardware profile (see services/hwfit/
     // profiles.py). n_cpu_moe offloads MoE expert layers to CPU when the model
@@ -712,8 +721,12 @@ export function _buildServeCmd(f, modelName, backend) {
     }
     if (_kv) {
       _lcExtra += ` --cache-type-k ${_kv} --cache-type-v ${_kv}`;
-      // llama-cpp-python exposes these as type_k/type_v; pass through best-effort.
-      _lcpExtra += ` --type_k ${_kv} --type_v ${_kv}`;
+      // llama-cpp-python takes type_k/type_v as ggml_type *integers*, not strings
+      // (passing "q8_0" errors with `--type_k: invalid int value`). Map the common
+      // cache types; omit when unknown so the bindings keep their f16 default.
+      const _ggmlType = { f32: 0, f16: 1, q4_0: 2, q4_1: 3, q5_0: 6, q5_1: 7, q8_0: 8 };
+      const _kvCode = _ggmlType[String(_kv).toLowerCase()];
+      if (_kvCode !== undefined) _lcpExtra += ` --type_k ${_kvCode} --type_v ${_kvCode}`;
     }
     const _llamaFit = String(f.llama_fit || '').trim();
     if (['on', 'off'].includes(_llamaFit)) _lcExtra += ` --fit ${_llamaFit}`;
@@ -744,14 +757,29 @@ export function _buildServeCmd(f, modelName, backend) {
       // llama-cpp-python takes the projector via --clip_model_path.
       _lcpExtra += ` --clip_model_path "${f._mmproj_path}"`;
     }
-    if (_isWindows()) {
-      const _lcpServer = `${lcPrefix}${py} -m llama_cpp.server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} --n_gpu_layers ${f.ngl || '99'} --n_ctx ${f.ctx || '8192'}${_lcpExtra}`;
+    const _lcpServer = `${lcPrefix}${py} -m llama_cpp.server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} --n_gpu_layers ${f.ngl || '99'} --n_ctx ${f.ctx || '8192'}${_lcpExtra}`;
+    if (_remoteWin) {
+      // Remote Windows runs via a PowerShell runner where `||` chaining isn't
+      // reliable and a native llama-server isn't auto-provisioned — keep the
+      // Python bindings (now with a valid integer --type_k, see above).
       cmd += _lcpServer;
     } else {
+      // POSIX and LOCAL Windows both have a native llama-server available — on
+      // Windows it's a prebuilt CUDA build (Blackwell-capable) with a Vulkan
+      // fallback, provisioned by _ensure_windows_llama_server into ~/bin. Prefer
+      // it: its flags (-ngl, -c, --cache-type-k, --flash-attn) are correct,
+      // unlike llama-cpp-python's. Python bindings stay as a last-resort fallback.
       cmd += `${lcPrefix}llama-server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} -ngl ${f.ngl || '99'} -c ${f.ctx || '8192'}${_lcExtra}`;
+      // Native first, Python bindings as a last-resort fallback (the validator
+      // allows `||`-chaining of allowlisted serve binaries). Both legs share the
+      // same MODEL_FILE resolved by the prelude below.
+      cmd += ` || ${_lcpServer}`;
     }
-    if (needsGgufPrelude) {
-      cmd = `MODEL_FILE=${ggufPath} && { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } || { echo "ERROR: No GGUF found on this host"; exit 1; } && ${cmd}`;
+    // Bash MODEL_FILE prelude — fail loudly on no-match instead of `--model ""`.
+    // Gated to !_remoteWin: remote Windows uses a PowerShell runner that can't
+    // execute this bash prelude (and embeds the path directly via modelArg).
+    if (needsGgufPrelude && !_remoteWin) {
+      cmd = `MODEL_FILE=${ggufPath} && { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } || { echo "ERROR: No GGUF found on this host. Either download the model here, or switch to the server where it's cached."; exit 1; } && ${cmd}`;
     }
   } else if (backend === 'ollama') {
     const ollamaPort = f.port || '11434';
@@ -2084,6 +2112,7 @@ function _wireTabEvents(body) {
       }
       return null;
     }
+    // async because the GGUF-no-tag guard below awaits a confirm dialog.
     const triggerDownload = async () => {
       const rawRepo = _stripHfUrl(dlInput.value);
       if (!rawRepo) return;
@@ -2143,6 +2172,10 @@ function _wireTabEvents(body) {
       let envPath = host ? (_hsrv.envPath || '') : _envState.envPath;
       const payload = { repo_id: repo };
       if (ollamaName) payload.backend = 'ollama';
+      // GGUF repos with no quant tag are handled above by the quant-picker
+      // guard (scan repo → require a pick → refuse a whole-repo download), so
+      // by here `include` is either an explicit :tag, a deep-file split, or the
+      // picker selection. (Ollama names go through `ollama pull`, no include.)
       if (autoInclude || pickerInclude) payload.include = autoInclude || pickerInclude;
       if (_envState.hfToken && !ollamaName) payload.hf_token = _envState.hfToken;
       if (host) { payload.remote_host = host; const _sp3 = _getPort(host); if (_sp3) payload.ssh_port = _sp3; }
@@ -2161,6 +2194,19 @@ function _wireTabEvents(body) {
         } else if (env === 'conda' && envPath) {
           payload.env_prefix = 'eval "$(conda shell.bash hook)" && conda activate ' + _shellQuote(envPath);
         }
+      }
+      // Honor the Cookbook-wide download location (local) and the Xet toggle,
+      // matching the model-card download path (_runModelDownload).
+      if (_envState.cacheDir && !host) payload.cache_dir = _envState.cacheDir;
+      payload.disable_xet = !_envState.useXet;
+      // Full-repo (no :QUANT tag) → offer Full vs Serving-only + set true total
+      // for an honest %. Skipped when a :tag include already scopes the files.
+      if (!autoInclude) {
+        try {
+          const _scope = await _resolveDownloadScope(repo);
+          if (_scope.exclude) payload.exclude = _scope.exclude;
+          if (_scope.expected_bytes) payload.expected_bytes = _scope.expected_bytes;
+        } catch { /* best-effort — fall back to full download */ }
       }
       const shortName = repo.split('/').pop();
       const displayName = payload.include
@@ -2496,6 +2542,32 @@ function _wireTabEvents(body) {
       }
     });
   }
+
+  // Download location — save on change. Persists to cookbook state (synced
+  // across devices) and applies to all subsequent Cookbook downloads + scans.
+  const dlDirInput = document.getElementById('hwfit-cachedir');
+  if (dlDirInput) {
+    dlDirInput.addEventListener('change', async () => {
+      _envState.cacheDir = dlDirInput.value.trim();
+      try { await _persistEnvState(); } catch {}
+      const flash = document.createElement('span');
+      flash.textContent = _envState.cacheDir ? 'Saved' : 'Using default cache';
+      flash.style.cssText = 'margin-left:8px;font-size:11px;color:var(--green,#50fa7b);opacity:0;transition:opacity 0.18s;flex-shrink:0;position:relative;top:1px;';
+      dlDirInput.parentNode.appendChild(flash);
+      requestAnimationFrame(() => { flash.style.opacity = '1'; });
+      setTimeout(() => { flash.style.opacity = '0'; setTimeout(() => flash.remove(), 220); }, 1400);
+    });
+  }
+
+  // Xet transfer toggle — save on change. Off (default) disables hf_xet for
+  // all Cookbook downloads via HF_HUB_DISABLE_XET; on re-enables it.
+  const xetToggle = document.getElementById('hwfit-use-xet');
+  if (xetToggle) {
+    xetToggle.addEventListener('change', async () => {
+      _envState.useXet = xetToggle.checked;
+      try { await _persistEnvState(); } catch {}
+    });
+  }
 }
 
 // ── Main render ──
@@ -2540,14 +2612,24 @@ export function _serverEntryHtml(s, i, defaultServer, forceRemote, isNew) {
   const modelDirs = Array.isArray(s.modelDirs) && s.modelDirs.length ? s.modelDirs : ['~/.cache/huggingface/hub'];
   const activeDlDir = s.downloadDir || '';
   html += `<div class="cookbook-modeldirs" style="margin:2px 0 0 0;display:flex;flex-wrap:wrap;gap:4px;align-items:center;">`;
-  html += `<span style="width:100%;font-size:13px;font-weight:600;margin-bottom:3px;">Model Directory <span style="font-weight:400;opacity:0.5;font-size:11px;">— check the one downloads should go to</span></span>`;
+  // Local downloads go wherever the global "Download location" setting points
+  // (it's the single source of truth), so the per-dir "download here" ✓ is only
+  // meaningful for remote servers — which the local Download location can't
+  // target. For local, Model Directory is purely a scan list.
+  const _mdHeaderHint = isLocal
+    ? 'folders scanned for downloaded models — new downloads go to the Download location above'
+    : 'check the one downloads should go to';
+  html += `<span style="width:100%;font-size:13px;font-weight:600;margin-bottom:3px;">Model Directory <span style="font-weight:400;opacity:0.5;font-size:11px;">— ${_mdHeaderHint}</span></span>`;
   for (let j = 0; j < modelDirs.length; j++) {
     const isDefault = modelDirs[j] === '~/.cache/huggingface/hub';
     const dirVal = isDefault ? '' : modelDirs[j];
     const isTarget = activeDlDir === dirVal;
-    const dlBtn = `<span class="cookbook-modeldir-dl${isTarget ? ' active' : ''}" title="${isTarget ? 'Downloads go here' : 'Send downloads here'}" data-dl-dir="${esc(dirVal)}">${isTarget ? _MODELDIR_CHECK_ON : _MODELDIR_CHECK_OFF}</span>`;
+    // Remote only: per-server download target. Local uses the Download location.
+    const dlBtn = isLocal
+      ? ''
+      : `<span class="cookbook-modeldir-dl${isTarget ? ' active' : ''}" title="${isTarget ? 'Downloads go here' : 'Send downloads here'}" data-dl-dir="${esc(dirVal)}">${isTarget ? _MODELDIR_CHECK_ON : _MODELDIR_CHECK_OFF}</span>`;
     const rmBtn = isDefault ? '' : ' <span class="cookbook-modeldir-rm" title="Remove">✖</span>';
-    html += `<span class="cookbook-modeldir-tag${isDefault ? ' cookbook-modeldir-default' : ''}${isTarget ? ' cookbook-modeldir-target' : ''}" data-dir-idx="${j}" data-dir="${esc(modelDirs[j])}">${dlBtn} ${esc(modelDirs[j])}${rmBtn}</span>`;
+    html += `<span class="cookbook-modeldir-tag${isDefault ? ' cookbook-modeldir-default' : ''}${isTarget ? ' cookbook-modeldir-target' : ''}" data-dir-idx="${j}" data-dir="${esc(modelDirs[j])}">${dlBtn}${dlBtn ? ' ' : ''}${esc(modelDirs[j])}${rmBtn}</span>`;
   }
   html += `<button class="cookbook-modeldir-add" title="Add model directory">+ Add</button>`;
   const _btnStyle = 'margin-left:auto;position:relative;top:-2px;height:22px;box-sizing:border-box;display:inline-flex;align-items:center;';
@@ -2832,6 +2914,33 @@ function _renderRecipes() {
     : 'hf_...';
   html += `<input type="password" class="memory-search-input" id="hwfit-hftoken" value="${esc(_es.hfToken || '')}" placeholder="${hfPlaceholder}" style="flex:1;" />`;
   html += `</div>`;
+  html += '</div>';
+  html += '</div>';
+
+  // ── Download location block ─────────────────────────────────────────
+  // A single Cookbook-wide download location. Exported as HF_HOME for every
+  // Cookbook download (and used to resolve the cache scan), so models land —
+  // and are found — in the same place. Empty = the default HF cache, whose
+  // resolved path is shown as the placeholder so the destination is never a
+  // mystery.
+  html += '<div class="admin-card" style="flex:0 0 auto;display:flex;flex-direction:column;">';
+  html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;margin-top:-4px;">';
+  html += '<h2 style="margin:0;padding:0;line-height:1;">Download location</h2>';
+  html += '</div>';
+  html += '<p class="memory-desc doclib-desc">Where Cookbook saves downloaded models (applies to all Cookbook downloads and scans). Leave empty to use the default HuggingFace cache.</p>';
+  html += '<div class="memory-toolbar">';
+  html += `<div style="display:flex;gap:4px;align-items:center;">`;
+  const _dlDirPlaceholder = esc(_es._hfCacheDefault || '~/.cache/huggingface/hub');
+  html += `<input type="text" class="memory-search-input" id="hwfit-cachedir" value="${esc(_es.cacheDir || '')}" placeholder="${_dlDirPlaceholder}" title="Folder where Cookbook saves models. Leave empty for the default HuggingFace cache shown here. A native path is fine (e.g. D:\\models or ./data/huggingface)." style="flex:1;" />`;
+  html += `</div>`;
+  // Xet transfer toggle. Off by default — hf_xet (HuggingFace's chunk
+  // downloader) accelerates large pulls but has stalled at 0 bytes on some
+  // Windows/network setups, leaving a download spinning forever. Off → the
+  // reliable HTTPS downloader. Flip on if Xet works well on your network.
+  html += `<label class="hwfit-sf-cb" style="margin-top:7px;display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">`;
+  html += `<input type="checkbox" id="hwfit-use-xet"${_es.useXet ? ' checked' : ''} />`;
+  html += `<span>Use Xet transfer <span style="color:var(--fg-muted);">— faster for big models, but can stall on some networks (off = reliable HTTPS)</span></span>`;
+  html += `</label>`;
   html += '</div>';
   html += '</div>';
 

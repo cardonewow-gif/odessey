@@ -938,7 +938,105 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         setTimeout(() => spinner.updateMessage('Analyzing sources'), 1500);
       } else {
         spinner.updateMessage('Processing request');
-        scheduleFirstTokenWaitMessages();
+        const endpointUrlForProbe = sessionModule.getCurrentEndpointUrl ? sessionModule.getCurrentEndpointUrl() : null;
+        if (endpointUrlForProbe && modelName) {
+          // Liveness watchdog for the pre-first-token wait. A LOCAL GPU serve can
+          // legitimately take a long time to its first token — the model is still
+          // warming, a large KV-cache/context is being allocated, or a heavy
+          // prompt eval is running (far longer on a big-context "Quality" profile,
+          // and worse under memory pressure). The fixed wall-clock timeout above
+          // must NOT kill such a healthy request. So once a probe CONFIRMS the
+          // endpoint is alive (a real 2xx response), we drop that deadline and
+          // just keep monitoring liveness; the request then ends only on a real
+          // token, a stall, or the user pressing Stop.
+          //
+          // `timed_out` stays ambiguous (on some Windows hosts a *dead* port also
+          // ConnectTimeouts, so a probe timeout ≠ definitely-alive) — we don't
+          // cancel on it, but we also keep the wall-clock as a backstop rather
+          // than clearing it. Only a genuine connection refusal, confirmed by two
+          // consecutive failed probes (to ride out a blip under heavy GPU load),
+          // starts the offline cancel countdown.
+          let _offlineStrikes = 0;
+          let _checkedOnce = false;
+          const _runProbe = (delay) => {
+            processingProbeTimer = setTimeout(async () => {
+              processingProbeTimer = null;
+              if (accumulated || !spinner || !spinner.element || (currentAbort && currentAbort.signal.aborted)) return;
+              processingProbeAbort = new AbortController();
+              try {
+                if (!_checkedOnce) { spinner.updateMessage('Checking model endpoint'); _checkedOnce = true; }
+                const status = await _probeCurrentEndpointStatus(endpointUrlForProbe, processingProbeAbort.signal);
+                if (accumulated || !spinner || !spinner.element || (currentAbort && currentAbort.signal.aborted)) return;
+                if (!status) {
+                  // Endpoint not resolvable yet — keep waiting, don't touch the deadline.
+                  spinner.updateMessage('Still waiting for model');
+                  _runProbe(8000);
+                } else if (status.alive) {
+                  // Confirmed up. Drop the fixed wall-clock kill and keep watching
+                  // liveness — a healthy server should never be auto-cancelled
+                  // mid-generation just for being slow to its first token.
+                  _offlineStrikes = 0;
+                  if (clearResponseTimeout) clearResponseTimeout();
+                  const latency = status.latency_ms ? ` (${status.latency_ms}ms)` : '';
+                  spinner.updateMessage(`Endpoint online${latency}; waiting for first token`);
+                  _runProbe(15000);
+                } else if (status.timed_out) {
+                  // Up-but-busy OR a slow-to-refuse dead port — ambiguous. Don't
+                  // cancel, but keep the wall-clock backstop (don't clear it).
+                  _offlineStrikes = 0;
+                  spinner.updateMessage('Model busy — waiting for first token');
+                  _runProbe(15000);
+                } else {
+                  // Genuine connection refusal (truly down, not merely slow).
+                  if (status.error) console.warn('Model endpoint probe failed:', status.error);
+                  _offlineStrikes++;
+                  if (_offlineStrikes < 2) {
+                    spinner.updateMessage('Endpoint not responding — rechecking…');
+                    _runProbe(3000);
+                  } else {
+                    // Two strikes: give the user 5s to read it, then auto-abort
+                    // with reason='offline' so the catch handler shows a clean
+                    // "switch model" message instead of spinning forever.
+                    let _countdown = 5;
+                    spinner.updateMessage(`Endpoint offline — cancelling in ${_countdown}s`);
+                    const _tick = setInterval(() => {
+                      _countdown--;
+                      if (!spinner || !spinner.element || (currentAbort && currentAbort.signal.aborted) || accumulated) {
+                        clearInterval(_tick);
+                        return;
+                      }
+                      if (_countdown > 0) {
+                        spinner.updateMessage(`Endpoint offline — cancelling in ${_countdown}s`);
+                      } else {
+                        clearInterval(_tick);
+                        if (currentAbort && !currentAbort.signal.aborted) {
+                          currentAbort._reason = 'offline';
+                          currentAbort.abort();
+                        }
+                      }
+                    }, 1000);
+                  }
+                }
+              } catch (e) {
+                if (e && e.name !== 'AbortError' && spinner && spinner.element && !accumulated) {
+                  spinner.updateMessage('Still waiting for model');
+                  _runProbe(8000);
+                }
+              } finally {
+                processingProbeAbort = null;
+              }
+            }, delay);
+          };
+          _runProbe(10000);
+        } else {
+          // No probe-able local endpoint (e.g. a cloud/remote API where a
+          // liveness probe isn't wired): fall back to dev's progressive
+          // first-token wait messages so the user still gets feedback during a
+          // long pre-fill. The watchdog above is preferred when available — it
+          // also clears the wall-clock deadline once the endpoint is confirmed
+          // alive, which the message-only scheduler does not do.
+          scheduleFirstTokenWaitMessages();
+        }
       }
       
       const researchBtn = el('research-toggle-btn');
