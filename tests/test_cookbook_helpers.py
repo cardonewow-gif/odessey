@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +12,8 @@ from routes.cookbook_helpers import (
     _cached_model_scan_script,
     _append_llama_cpp_linux_accel_build_lines,
     _append_pip_install_runner_lines,
+    _append_zero_byte_incomplete_cleanup_lines,
+    _append_zero_byte_incomplete_cleanup_ps_lines,
     _append_serve_exit_code_lines,
     _append_serve_preflight_exit_lines,
     _llama_cpp_rebuild_cmd,
@@ -858,6 +861,113 @@ def test_cached_model_scan_uses_huggingface_cache_env(tmp_path):
 
     by_repo = {m["repo_id"]: m for m in json.loads(proc.stdout)}
     assert by_repo["Qwen/Qwen3.6-35B"]["path"] == str(hf_cache)
+
+
+def test_zero_byte_incomplete_cleanup_lines_only_target_zero_byte_markers(tmp_path):
+    repo_id = "Qwen/Qwen3.6-35B"
+    repo_cache = repo_id.replace("/", "--")
+    models_dir = tmp_path / "models"
+    marker_dir = models_dir / "hub" / f"models--{repo_cache}" / "blobs"
+    marker_dir.mkdir(parents=True)
+    marker = marker_dir / "abc123.incomplete"
+    marker.touch()
+
+    lines = []
+    _append_zero_byte_incomplete_cleanup_lines(
+        lines,
+        repo_id=repo_id,
+        local_dir="~/models",
+    )
+    script = "\n".join(lines)
+
+    assert 'models--Qwen--Qwen3.6-35B' in script
+    assert 'find "$_od_root" -type f -name "*.incomplete" -size 0c -print0' in script
+    assert '_od_prune_zero_incomplete "$HOME/models/hub/models--Qwen--Qwen3.6-35B"' in script
+    assert '[ -n "$HF_HOME" ]' in script
+    assert '[ -n "$HUGGINGFACE_HUB_CACHE" ]' in script
+
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path)
+    result = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+    assert result.returncode == 0
+    assert not marker.exists(), "Zero-byte marker under local_dir/hub layout should be removed"
+    assert "Removed 1 stale zero-byte" in result.stdout
+
+
+def test_zero_byte_incomplete_cleanup_lines_honors_hf_home(tmp_path):
+    repo_id = "Qwen/Qwen3.6-35B"
+    repo_cache = repo_id.replace("/", "--")
+    hf_home = tmp_path / "custom_hf"
+    marker_dir = hf_home / "hub" / f"models--{repo_cache}" / "blobs"
+    marker_dir.mkdir(parents=True)
+    marker = marker_dir / "abc123.incomplete"
+    marker.touch()
+
+    lines = []
+    _append_zero_byte_incomplete_cleanup_lines(lines, repo_id=repo_id)
+    script = "\n".join(lines)
+
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path / "empty_home")
+    env["HF_HOME"] = str(hf_home)
+    (tmp_path / "empty_home").mkdir()
+    result = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+    assert result.returncode == 0
+    assert not marker.exists(), "Zero-byte marker under HF_HOME should be removed"
+
+
+def test_zero_byte_incomplete_cleanup_ps_lines_filter_length_zero(tmp_path):
+    repo_id = "Qwen/Qwen3.6-35B"
+    repo_cache = repo_id.replace("/", "--")
+    models_dir = tmp_path / "models"
+    marker_dir = models_dir / "hub" / f"models--{repo_cache}" / "blobs"
+    marker_dir.mkdir(parents=True)
+    marker = marker_dir / "abc123.incomplete"
+    marker.touch()
+
+    lines = []
+    _append_zero_byte_incomplete_cleanup_ps_lines(
+        lines,
+        repo_id=repo_id,
+        local_dir=str(models_dir),
+    )
+    script = "\n".join(lines)
+
+    assert "$HOME/.cache/huggingface/hub/models--Qwen--Qwen3.6-35B" in script
+    assert "Where-Object { $_.Length -eq 0 }" in script
+    assert f"/hub/models--{repo_cache}" in script
+    assert "$env:HF_HOME" in script
+    assert "$env:HUGGINGFACE_HUB_CACHE" in script
+
+    ps = shutil.which("pwsh") or shutil.which("powershell")
+    if ps is None:
+        pytest.skip("PowerShell not available")
+
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path / "empty_home")
+    (tmp_path / "empty_home").mkdir()
+    result = subprocess.run(
+        [ps, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists(), "Zero-byte marker under local_dir/hub layout should be removed"
+    assert "Removed 1 stale zero-byte" in result.stdout
 
 
 # ── #1219 / #1459: keep big dependency wheel builds off the home pip cache ──
