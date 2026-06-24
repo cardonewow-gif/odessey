@@ -1,0 +1,55 @@
+import sys
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from typing import List, Optional, Literal
+from core.database import Session, get_db
+from src.auth_helpers import get_current_user
+from services.trace_export import build_trace_records
+
+
+router = APIRouter()
+
+class TraceExportRequest(BaseModel):
+    session_id: str
+    message_ids: List[str]
+    label: Literal["success", "failed", "needs_review"] 
+    note: Optional[str] = None
+
+@router.post("/trace/export")
+async def export_trace(
+    payload: TraceExportRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    try:
+        data = build_trace_records(
+            db=db,
+            current_user=current_user,
+            session_id=payload.session_id,
+            message_ids=payload.message_ids,
+            label=payload.label,
+            note=payload.note
+        )
+        if data is None:
+            raise HTTPException(
+                status_code=403,
+                detail="Export failed: Unathorized or invalid session data."
+            )
+
+        return {
+            "status": "success",
+            "data": data
+            }
+        
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Internal server error")
