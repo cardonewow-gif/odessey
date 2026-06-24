@@ -59,3 +59,69 @@ async def test_probe_endpoint_surfaces_http_exception_detail(monkeypatch):
     assert "Model 'o3-mini' probe failed" in msg
     assert "max_tokens is not supported" in msg
     assert "Cannot reach model" not in msg
+
+
+@pytest.mark.asyncio
+async def test_probe_endpoint_uses_configured_timeout(monkeypatch):
+    captured = {}
+
+    async def _ok(*args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return "ok"
+
+    monkeypatch.setattr("src.llm_core.llm_call_async", _ok)
+
+    await ResearchHandler._probe_endpoint(
+        "http://local.test/v1/chat/completions",
+        "local-model",
+        timeout=123,
+    )
+
+    assert captured["timeout"] == 123
+
+
+@pytest.mark.asyncio
+async def test_call_research_service_uses_and_clamps_probe_timeout(monkeypatch):
+    captured_timeout = None
+
+    # Use *args and **kwargs to avoid positional/keyword argument mismatches with self
+    async def mock_probe_endpoint(*args, **kwargs):
+        nonlocal captured_timeout
+        captured_timeout = kwargs.get("timeout")
+        raise RuntimeError("stop_early_stub")
+
+    monkeypatch.setattr(ResearchHandler, "_probe_endpoint", mock_probe_endpoint)
+    handler = ResearchHandler()
+
+    # 1. Assert it successfully picks up a standard configured timeout value
+    monkeypatch.setattr(
+        "src.settings.get_setting",
+        lambda key, default=None: 75 if key == "research_probe_timeout_seconds" else default
+    )
+    with pytest.raises(RuntimeError, match="stop_early_stub"):
+        await handler.call_research_service(
+            query="test", llm_endpoint="http://local.test", llm_model="test-model"
+        )
+    assert captured_timeout == 75
+
+    # 2. Assert it clamps an out-of-range low configuration value to the minimum (15)
+    monkeypatch.setattr(
+        "src.settings.get_setting",
+        lambda key, default=None: 5 if key == "research_probe_timeout_seconds" else default
+    )
+    with pytest.raises(RuntimeError, match="stop_early_stub"):
+        await handler.call_research_service(
+            query="test", llm_endpoint="http://local.test", llm_model="test-model"
+        )
+    assert captured_timeout == 15
+
+    # 3. Assert it clamps an out-of-range high configuration value to the maximum (3600)
+    monkeypatch.setattr(
+        "src.settings.get_setting",
+        lambda key, default=None: 5000 if key == "research_probe_timeout_seconds" else default
+    )
+    with pytest.raises(RuntimeError, match="stop_early_stub"):
+        await handler.call_research_service(
+            query="test", llm_endpoint="http://local.test", llm_model="test-model"
+        )
+    assert captured_timeout == 3600
