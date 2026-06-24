@@ -668,6 +668,53 @@ async def build_chat_context(
         _preface_kwargs["use_rag"] = use_rag_val
     preface, rag_sources, web_sources = chat_processor.build_context_preface(**_preface_kwargs)
 
+    # Project context injection — prepend project instructions and pinned docs
+    # BEFORE the preface so they appear at the front of the system context.
+    # Owner isolation: the project and each pinned document must belong to the
+    # same owner as the session. Mismatched rows are silently skipped so that
+    # anomalous or legacy data never leaks cross-user context.
+    if getattr(sess, "project_id", None):
+        _project_extra = []
+        _pdb = SessionLocal()
+        try:
+            from core.database import Project as ProjectModel, ProjectDocument, Document as DocModel
+            _session_owner = getattr(sess, "owner", None)
+            _proj = _pdb.query(ProjectModel).filter(
+                ProjectModel.id == sess.project_id,
+                ProjectModel.archived == False,  # noqa: E712
+            ).first()
+            # Skip injection entirely if the project owner does not match the
+            # session owner — this prevents cross-owner instruction leakage.
+            if _proj and _proj.owner == _session_owner:
+                if _proj.instructions and _proj.instructions.strip():
+                    _project_extra.append({
+                        "role": "system",
+                        "content": f"Project instructions ({_proj.name}):\n{_proj.instructions.strip()}",
+                    })
+                _pinned = _pdb.query(ProjectDocument).filter(
+                    ProjectDocument.project_id == _proj.id
+                ).all()
+                for _pd in _pinned:
+                    # Only inject documents that belong to the same owner as the
+                    # session — filters out anomalous or legacy cross-owner rows.
+                    _doc = _pdb.query(DocModel).filter(
+                        DocModel.id == _pd.document_id,
+                        DocModel.owner == _session_owner,
+                    ).first()
+                    if _doc and _doc.current_content:
+                        _project_extra.append(
+                            untrusted_context_message(
+                                f"project pinned document: {_doc.title or _doc.id}",
+                                _doc.current_content[:8000],
+                            )
+                        )
+        except Exception as _pe:
+            logger.warning("Project context injection failed: %s", _pe)
+        finally:
+            _pdb.close()
+        if _project_extra:
+            preface = _project_extra + preface
+
     # Capture used memories immediately
     used_memories = getattr(chat_processor, '_last_used_memories', [])
 
