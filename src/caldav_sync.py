@@ -288,6 +288,7 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
         calendars = principal.calendars()
     except (AuthorizationError, NotFoundError) as e:
         result["errors"].append(f"Discovery failed: {e}")
+        client.close()
         return result
     except Exception as e:
         logger.info(f"CalDAV principal discovery failed, trying URL as calendar: {e}")
@@ -295,6 +296,7 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
             calendars = [_open_url_as_calendar(client, url)]
         except Exception as e2:
             result["errors"].append(f"Could not open URL as calendar: {e2}")
+            client.close()
             return result
 
     if not calendars:
@@ -302,6 +304,7 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
             calendars = [_open_url_as_calendar(client, url)]
         except Exception as e:
             result["errors"].append(f"No calendars and URL fallback failed: {e}")
+            client.close()
             return result
 
     start = datetime.utcnow() - timedelta(days=_LOOKBACK_DAYS)
@@ -479,6 +482,7 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
                 db.rollback()
     finally:
         db.close()
+        client.close()
 
     return result
 
