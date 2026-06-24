@@ -42,6 +42,9 @@ ALWAYS_AVAILABLE = frozenset({
     "ask_user",
     # Write back to the active plan (tick steps done / revise) during execution.
     "update_plan",
+    # Read-only web tools, kept in context every round so their call
+    # format is always available (mutators/file tools stay out; #3665).
+    "web_search", "web_fetch",
 })
 
 # Tools that the Personal Assistant always has access to during scheduled
