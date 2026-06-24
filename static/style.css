@@ -9628,27 +9628,28 @@ details a:hover {
   border-radius: 4px;
 }
 
-/* Keywords & control flow — purple/magenta */
+/* Keywords & control flow — purple/magenta. Hardcoded fallbacks so a custom
+   theme that doesn't set the --hl-* vars still highlights instead of going flat. */
 .hljs-keyword,
-.hljs-selector-tag { color: var(--hl-keyword); }
+.hljs-selector-tag { color: var(--hl-keyword, #c678dd); }
 
 /* Strings & regex — warm yellow/orange */
 .hljs-string,
 .hljs-regexp,
-.hljs-addition { color: var(--hl-string); }
+.hljs-addition { color: var(--hl-string, #98c379); }
 
 /* Comments & docs — muted. font-style intentionally omitted: italics shift
    glyph widths in the highlight overlay relative to the transparent textarea
    above it, which makes the caret drift away from the visible character. */
 .hljs-comment,
 .hljs-quote,
-.hljs-meta { color: var(--hl-comment); }
+.hljs-meta { color: var(--hl-comment, #7f848e); }
 
 /* Functions & method names — blue */
 .hljs-function,
 .hljs-title,
 .hljs-title.function_,
-.hljs-section { color: var(--hl-function); }
+.hljs-section { color: var(--hl-function, #61afef); }
 
 /* Numbers & constants — distinct from strings */
 .hljs-number,
@@ -9663,7 +9664,10 @@ details a:hover {
 /* Variables & identifiers — fg with slight distinction */
 .hljs-variable,
 .hljs-template-variable,
-.hljs-attr { color: var(--hl-variable, var(--hl-fg, var(--fg))); }
+.hljs-attr,
+/* CSS property names emit `.hljs-attribute` (distinct from `.hljs-attr`); without
+   this rule they stayed default-coloured in CSS docs. */
+.hljs-attribute { color: var(--hl-variable, var(--hl-fg, var(--fg))); }
 
 /* Operators & punctuation — slightly dimmed fg */
 .hljs-operator,
@@ -12289,6 +12293,28 @@ textarea.memory-add-input {
   100% { box-shadow: inset 0 0 0 2px transparent; }
 }
 
+/* "AI can see this" badge — shown on the open doc, which is injected into the
+   chat's context. Themed pill so it reads as ambient, not alarming. */
+.doc-ai-context-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  color: var(--brand-color, var(--accent));
+  background: color-mix(in srgb, var(--brand-color, var(--accent)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand-color, var(--accent)) 30%, transparent);
+  white-space: nowrap;
+  cursor: default;
+}
+.doc-ai-context-badge svg { opacity: 0.85; flex-shrink: 0; }
+/* Drop the label to just the eye icon when the editor pane is narrow
+   (the pane sets container-name: docpane). */
+@container docpane (max-width: 540px) {
+  .doc-ai-context-label { display: none; }
+}
+
 /* In the doc footer the type picker sits next to the accent Copy/Export split —
    match its 28px height and 6px radius so the right-hand controls line up. */
 .doc-actions-footer #doc-language-select {
@@ -13061,6 +13087,13 @@ mark.doc-find-mark.current {
   z-index: 1;
   background: transparent !important;
   color: transparent !important;
+  /* `color: transparent` alone isn't enough on Blink (Chromium/Zen): the
+     textarea's own glyphs can still paint via -webkit-text-fill-color
+     (defaults to currentColor) ON TOP of the highlighted overlay, hiding it and
+     leaving the code looking flat/monochrome. Pin the text-fill transparent too
+     so only the coloured overlay below is visible. The caret stays via
+     caret-color. */
+  -webkit-text-fill-color: transparent !important;
   color-scheme: dark;
   caret-color: var(--fg);
   border: none;
@@ -13117,12 +13150,10 @@ mark.doc-find-mark.current {
 .doc-editor-textarea:focus,
 .doc-editor-textarea:active {
   background: transparent !important;
-  /* Used to force `color: transparent` here so the hidden two-layer
-     textarea wouldn't bleed through on hover/focus. Now that the
-     textarea renders its OWN visible text (overlay is hidden), forcing
-     transparent here makes typed text disappear the moment the cursor
-     enters the page. Keep the visible fg color instead. */
-  color: var(--fg) !important;
+  /* Don't paint the textarea's own text here. The highlight overlay behind it
+     is the visible layer for normal docs; the textarea's glyphs must stay
+     transparent (base rule) so the coloured overlay shows through. Email docs
+     keep visible text via the .email-mode rule below. */
   outline: none !important;
 }
 .doc-editor-textarea::placeholder {
@@ -30353,18 +30384,16 @@ button .spinner-whirlpool {
   font-variant-emoji: emoji;
 }
 
-/* Single-layer rendering for ALL documents (not just email): the highlight
-   overlay (<pre> with hljs spans) and the transparent textarea use two
-   different rendering paths internally — the textarea uses the browser's
-   native form line-breaker, the overlay uses CSS line-breaking — and they
-   can never be guaranteed to wrap byte-identical no matter how many CSS
-   properties are pinned. Pick one source of truth: make the textarea its
-   own visible text, hide the overlay. Trade-off: no syntax highlighting in
-   the live editor (rendered markdown preview / chat output still has it).
-   The caret is now glued to the typed text by definition since both are
-   rendered by the same element. */
-.doc-editor-highlight,
-#doc-editor-code.email-mode .doc-editor-highlight {
+/* Two-layer rendering (transparent textarea over an hljs-highlighted <pre>)
+   is restored for normal documents so the live editor shows syntax colours.
+   Both layers pin identical metrics (font-size/line-height/padding, ligatures
+   off, scrollbar-gutter stable) so soft-wrap stays aligned between them; minor
+   wrap divergence on very long wrapped lines is the accepted trade-off for
+   having highlighting (product decision: keep soft-wrap).
+   EMAIL documents keep single-layer rendering — the overlay is hidden and the
+   textarea renders its own visible text — because email composes in a separate
+   rich editor and doesn't want code highlighting. */
+.doc-editor-highlight.email-mode {
   display: none !important;
 }
 /* Find bar is open: float the highlight overlay ON TOP of the
@@ -30378,8 +30407,12 @@ body.doc-find-active #doc-editor-code.email-mode .doc-editor-highlight {
   background: transparent !important;
   pointer-events: none;
 }
-body.doc-find-active .doc-editor-highlight,
-body.doc-find-active .doc-editor-highlight * {
+/* Only email (single-layer) needs the floated overlay's text forced transparent
+   so the textarea below stays the text source. Normal two-layer docs keep the
+   overlay's coloured code visible during find — the solid <mark> spans simply
+   render in place. */
+body.doc-find-active .doc-editor-highlight.email-mode,
+body.doc-find-active .doc-editor-highlight.email-mode * {
   color: transparent !important;
   background: transparent !important;
 }
@@ -30394,11 +30427,16 @@ body.doc-find-active mark.doc-find-mark.current {
   box-shadow: 0 0 0 2px var(--fg) !important;
   outline: 1px solid var(--fg) !important;
 }
-.doc-editor-textarea,
-#doc-editor-code.email-mode .doc-editor-textarea {
-  color: var(--fg) !important;
-  caret-color: var(--fg) !important;
+.doc-editor-textarea {
+  /* On top of the overlay, transparent text (base rule) so colours show
+     through; caret stays visible via caret-color. */
   z-index: 1;
+}
+.doc-editor-textarea.email-mode {
+  /* Email is single-layer: the textarea is the visible text layer. */
+  color: var(--fg) !important;
+  -webkit-text-fill-color: var(--fg) !important;
+  caret-color: var(--fg) !important;
 }
 
 /* Emoji picker (monochrome icon picker) */

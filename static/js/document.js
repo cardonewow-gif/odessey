@@ -547,7 +547,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const badge = document.getElementById('doc-version-badge');
 
     if (textarea) textarea.value = '';
-    if (textarea) textarea.placeholder = 'Start typing or paste text to create a document...';
+    if (textarea) textarea.placeholder = 'Start typing, or ask the AI in chat to write this document for you…';
     if (textarea) textarea.disabled = false;
     if (langSelect) langSelect.value = '';
     if (badge) badge.textContent = '';
@@ -3690,6 +3690,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (langSelect) langSelect.value = doc.language || 'markdown';
     if (badge) { const _v = doc.version || 1; badge.textContent = `v${_v}`; badge.style.display = _v > 1 ? '' : 'none'; }
     { const _v = doc.version || 1; const _dbtn = document.getElementById('doc-diff-toggle-btn'); if (_dbtn) _dbtn.style.display = _v > 1 ? '' : 'none'; }
+    // The open doc is injected into the chat's context (agent_loop's ACTIVE
+    // DOCUMENT block), so show the "AI can see this" badge for normal docs.
+    { const _b = document.getElementById('doc-ai-context-badge');
+      if (_b) _b.style.display = (doc.language === 'email' || doc.language === 'pdf') ? 'none' : ''; }
     syncHighlighting();
     // Deferred re-sync: ensure minHeight is correct after browser layout
     requestAnimationFrame(() => {
@@ -3947,6 +3951,22 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (!container) return;
 
     isOpen = true;
+    // Bind the Ctrl/Cmd+S catch once: with a doc open it flushes the (already
+    // automatic) save and confirms it, instead of letting the browser pop its
+    // "save this HTML page" dialog. Guarded so re-opening doesn't stack handlers.
+    if (!window._docCtrlSSaveBound) {
+      window._docCtrlSSaveBound = true;
+      document.addEventListener('keydown', (e) => {
+        if (!isOpen || !activeDocId) return;
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 's' || e.key === 'S')) {
+          e.preventDefault();
+          if (_autoSaveDebounce) { clearTimeout(_autoSaveDebounce); _autoSaveDebounce = null; }
+          saveDocument({ silent: true })
+            .then(() => uiModule && uiModule.showToast('Document saved automatically'))
+            .catch(() => uiModule && uiModule.showError('Save failed'));
+        }
+      });
+    }
     // Doc was opened last → it goes in front of the email windows (clears the
     // email-front flag; the doc/email z-index alternation lives in CSS).
     document.body.classList.remove('email-front');
@@ -4022,6 +4042,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       <div class="doc-editor-header" id="doc-editor-actions">
         <button id="doc-undo-btn" class="doc-action-icon-btn" title="Undo (Ctrl+Z)" style="gap:4px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg><span style="font-size:11px;">Undo</span></button>
         <button id="doc-header-preview-btn" class="doc-action-icon-btn" title="Run / Preview" style="display:none;opacity:0.85;gap:4px;"></button>
+        <span id="doc-ai-context-badge" class="doc-ai-context-badge" title="The AI can see and edit this document — it's in the chat's context." style="display:none"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span class="doc-ai-context-label">AI can see this</span></span>
         <span id="doc-stream-indicator" class="doc-stream-indicator" style="display:none"><span class="doc-stream-dot"></span> editing</span>
         <span id="doc-version-badge" class="doc-version-badge" title="Version history" style="display:none">v1</span>
         <span style="flex:1"></span>
@@ -4054,8 +4075,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           <option value="email">email</option>
           <option value="pdf">pdf</option>
         </select>
-        <!-- Close + Copy/Export moved to the bottom action footer (#doc-actions-footer)
-             so regular docs match the email footer layout. -->
+        <!-- Copy/Export live in the bottom action footer (#doc-actions-footer).
+             Keep a clear, discoverable Close in the top-right so returning to
+             chat + nav is one obvious click (esp. on the mobile full-screen
+             sheet). -->
+        <button id="doc-header-close-btn" class="doc-action-icon-btn" title="Close document (back to chat)" aria-label="Close document" style="margin-left:4px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
       <div class="doc-tab-bar" id="doc-tab-bar"></div>
       <div id="doc-email-header" class="doc-email-header" style="display:none">
@@ -4366,6 +4390,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // Mobile grab handle — swipe down to dismiss (like the other sheet windows).
     _wireSwipeDismiss(document.getElementById('doc-mobile-grabber'));
     document.getElementById('doc-mobile-grabber')?.addEventListener('click', () => closePanel('down'));
+    // Clear top-right Close → back to chat + nav.
+    document.getElementById('doc-header-close-btn')?.addEventListener('click', () => closePanel('down'));
 
     // Wire up events
     document.getElementById('doc-close-btn')?.addEventListener('click', () => closePanel('down'));
@@ -6568,6 +6594,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     }
   }
 
+  // Dropdown options that are document TYPES, not highlight.js grammars — hljs
+  // has no grammar for them, so they render as plain text (no highlight, and no
+  // auto-detect which would mis-colour their content).
+  const _NO_HLJS_GRAMMAR = new Set(['csv', 'email', 'pdf']);
+
   /** Sync highlighted overlay with textarea content */
   function syncHighlighting() {
     const textarea = document.getElementById('doc-editor-textarea');
@@ -6586,10 +6617,39 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // hljs has no 'svg' grammar — highlight it as xml (the dropdown value stays
     // 'svg' so the preview/run routing still treats it as renderable markup).
     const _hlLang = lang === 'svg' ? 'xml' : lang;
-    codeEl.className = _hlLang ? `language-${_hlLang}` : '';
-    if (window.hljs && _hlLang) {
-      codeEl.removeAttribute('data-highlighted');
-      window.hljs.highlightElement(codeEl);
+    if (_NO_HLJS_GRAMMAR.has(lang)) {
+      // csv/email/pdf are document TYPES, not hljs grammars — render plain
+      // (and DON'T auto-detect: that would mis-colour CSV/email content).
+      codeEl.className = '';
+    } else if (window.hljs && _hlLang) {
+      // Use hljs.highlight(...).value + innerHTML rather than highlightElement().
+      // highlightElement() left this overlay flat/monochrome, while the SAME
+      // window.hljs highlights chat and library code blocks fine via .highlight()
+      // (see documentLibrary.js / chatRenderer.js). Mirror that working path.
+      try {
+        const r = window.hljs.highlight(text + '\n', { language: _hlLang, ignoreIllegals: true });
+        codeEl.className = 'hljs';
+        codeEl.innerHTML = r.value;
+      } catch (_) {
+        // Language not registered in this hljs build — auto-detect instead.
+        try {
+          const r2 = window.hljs.highlightAuto(text + '\n');
+          codeEl.className = 'hljs';
+          codeEl.innerHTML = r2.value;
+        } catch (_e) { codeEl.className = ''; }
+      }
+    } else if (window.hljs && text.trim()) {
+      // No usable language on the dropdown — happens when a doc was stored with
+      // a language hljs/the editor doesn't list (e.g. an AI-created script saved
+      // as 'text'), which left `select.value` empty and the code flat monochrome.
+      // Auto-detect so it still gets themed syntax highlighting instead of none.
+      try {
+        const r = window.hljs.highlightAuto(text + '\n');
+        codeEl.className = 'hljs';
+        codeEl.innerHTML = r.value;
+      } catch (_) { codeEl.className = ''; }
+    } else {
+      codeEl.className = _hlLang ? `language-${_hlLang}` : '';
     }
     // Markdown post-processing: colorize standalone [brackets] and heading markers
     if (lang === 'markdown') {
@@ -10017,6 +10077,27 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     return activeDocId;
   }
 
+  /** Return the open doc's id, materializing an empty "Untitled" ghost into a
+   *  real doc first if needed.
+   *
+   *  The empty-state panel shows a ghost "Untitled" tab with NO persisted doc
+   *  (activeDocId is null), so chat send couldn't pass an active_doc_id — the
+   *  AI then never saw the doc the user had open and instead listed other
+   *  library docs and asked "which one?". Materializing on send gives it a real
+   *  id so "add a calculator to the untitled document" targets THIS doc. */
+  export async function ensureActiveDocId(sessionId) {
+    if (activeDocId) return activeDocId;
+    if (!isOpen) return null;               // no panel open → nothing to attach
+    try {
+      let sid = sessionId;
+      if (!sid && typeof _autoCreateSession === 'function') {
+        try { sid = await _autoCreateSession(); } catch (_) {}
+      }
+      await createDocument(sid);            // creates an empty doc + sets activeDocId
+    } catch (e) { console.error('ensureActiveDocId failed:', e); }
+    return activeDocId;
+  }
+
   /** Find an open email tab by source UID + folder. Returns docId or null. */
   export function findEmailDocId(uid, folder) {
     if (uid == null) return null;
@@ -10058,6 +10139,7 @@ const documentModule = {
   exitDiffMode,
   isDiffModeActive,
   getCurrentDocId,
+  ensureActiveDocId,
   findEmailDocId,
   getSelectionContext,
   clearSelection,
