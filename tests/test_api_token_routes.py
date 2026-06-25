@@ -330,8 +330,6 @@ def test_delete_missing_token_returns_404_without_invalidating_cache(monkeypatch
 # ---------------------------------------------------------------------------
 # 6. PATCH /api/tokens/{id} — a partial update must not wipe scopes
 # ---------------------------------------------------------------------------
-
-
 def _patch_request(invalidator, body):
     """An admin request whose async .json() yields `body`."""
     req = _req("alice", is_admin=True, invalidator=invalidator)
@@ -406,6 +404,16 @@ def test_update_missing_token_returns_404(monkeypatch, token_routes_mod):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(update_token(request=req, token_id="missing99"))
     assert exc.value.status_code == 404
+
+
+def test_companion_token_profile_includes_remote_development(token_routes_mod):
+    mod = token_routes_mod
+
+    assert mod._normalize_scopes(profile="companion") == [
+        "chat",
+        "remote_development",
+    ]
+    assert "remote_development" in mod.ALLOWED_SCOPES
 
 
 # ---------------------------------------------------------------------------
@@ -576,3 +584,13 @@ def test_update_token_normal_object_still_works(monkeypatch, token_routes_mod):
     assert token.name == "updated"
     assert resp["name"] == "updated"
     invalidator.assert_called_once()
+
+
+def test_companion_token_profile_includes_remote_development(token_routes_mod):
+    mod = token_routes_mod
+
+    assert mod._normalize_scopes(profile="companion") == [
+        "chat",
+        "remote_development",
+    ]
+    assert "remote_development" in mod.ALLOWED_SCOPES

@@ -14,7 +14,7 @@ from core.database import Session as DBSession, ModelEndpoint
 from src.llm_core import normalize_model_id
 from src.endpoint_resolver import normalize_base
 from src.context_compactor import maybe_compact, trim_for_context
-from src.auth_helpers import effective_user
+from src.auth_helpers import get_current_user as _get_current_user
 from src.prompt_security import untrusted_context_message
 from routes.prefs_routes import _load_for_user as load_prefs_for_user
 
@@ -47,6 +47,30 @@ def _is_casual_low_signal(text: str) -> bool:
     tail_words = re.findall(r"[A-Za-z0-9_'-]+", tail)
     return len(tail_words) <= 2
 
+
+def get_current_user(request):
+    """Project-local shim that preserves the auth-helper boundary for tests.
+
+    Some existing unit tests patch ``routes.chat_helpers.get_current_user``
+    directly; routing this symbol through a local wrapper keeps those tests
+    and call sites compatible while preserving behavior from
+    ``src.auth_helpers``.
+    """
+    return _get_current_user(request)
+
+
+def effective_user(request):
+    """Resolve token-auth'd requests to the token's owning user.
+
+    API-token holders should act as their owning human account for
+    ownership-scoped chat actions, not as the synthetic ``"api"`` user.
+    """
+    state = getattr(request, "state", None)
+    if getattr(state, "api_token", False):
+        owner = getattr(state, "api_token_owner", None)
+        if owner:
+            return owner
+    return get_current_user(request)
 
 # Strong references to in-flight fire-and-forget tasks scheduled from this
 # module. asyncio only keeps weak references to tasks created via

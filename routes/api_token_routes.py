@@ -27,9 +27,11 @@ ALLOWED_SCOPES = {
     "memory:write",
     "cookbook:read",
     "cookbook:launch",
+    "remote_development",
 }
 TOKEN_PROFILES = {
     "chat": ["chat"],
+    "companion": ["chat", "remote_development"],
     "codex_todos": ["todos:read", "todos:write"],
     "codex_documents": ["documents:read", "documents:write"],
     "codex_email_drafts": ["email:read", "email:draft", "documents:read", "documents:write"],

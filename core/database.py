@@ -485,6 +485,51 @@ class ApiToken(TimestampMixin, Base):
     last_used_at = Column(DateTime, nullable=True)
 
 
+class CompanionDeviceKey(TimestampMixin, Base):
+    """Owner-approved public keys for future companion signed commands."""
+    __tablename__ = "companion_device_keys"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=False, index=True)
+    key_id = Column(String, nullable=False)
+    label = Column(String, nullable=False, default="Companion device")
+    public_key_b64 = Column(Text, nullable=False)
+    algorithm = Column(String, nullable=False, default="ed25519")
+    protocol_version = Column(Integer, nullable=False, default=1)
+    scopes = Column(String, nullable=False, default="remote_development")
+    is_active = Column(Boolean, default=True, nullable=False)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index('ix_companion_device_keys_owner_key_id', 'owner', 'key_id', unique=True),
+        Index('ix_companion_device_keys_owner_active', 'owner', 'is_active'),
+    )
+
+
+class CompanionCommandNonce(Base):
+    """Replay-protection nonce used by companion signed command envelopes."""
+    __tablename__ = "companion_command_nonces"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    owner = Column(String, nullable=False, index=True)
+    key_id = Column(String, nullable=False)
+    nonce = Column(String, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=utcnow_naive, nullable=False)
+
+    __table_args__ = (
+        Index(
+            'ix_companion_command_nonces_owner_key_nonce',
+            'owner',
+            'key_id',
+            'nonce',
+            unique=True,
+        ),
+        Index('ix_companion_command_nonces_expires_at', 'expires_at'),
+    )
+
+
 class Webhook(TimestampMixin, Base):
     """Outgoing webhooks fired on events."""
     __tablename__ = "webhooks"

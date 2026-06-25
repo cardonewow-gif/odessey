@@ -11,13 +11,17 @@ import os
 import secrets
 import socket
 import uuid
+from urllib.parse import urlsplit, urlunsplit
 
 import bcrypt
 
 from src.constants import AUTH_FILE
 
 PAIRING_VERSION = 1
-COMPANION_SCOPE = "chat"
+CHAT_SCOPE = "chat"
+REMOTE_DEVELOPMENT_SCOPE = "remote_development"
+COMPANION_SCOPES = (CHAT_SCOPE, REMOTE_DEVELOPMENT_SCOPE)
+COMPANION_SCOPE = ",".join(COMPANION_SCOPES)
 
 
 def default_port() -> int:
@@ -27,6 +31,38 @@ def default_port() -> int:
         return int(os.environ.get("APP_PORT", "7000"))
     except ValueError:
         return 7000
+
+
+def configured_base_url(value: str | None = None) -> str | None:
+    """Configured private remote origin for pairing payloads.
+
+    This is intentionally strict: pairing QR codes may carry bearer tokens, so
+    only plain http(s) origins are accepted. Paths, credentials, queries, and
+    fragments are rejected by returning None, which lets callers fall back to
+    LAN host/port pairing.
+    """
+    raw = (value if value is not None else os.environ.get("COMPANION_BASE_URL", "")).strip()
+    if not raw or any(ch.isspace() for ch in raw):
+        return None
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    try:
+        parsed.port
+    except ValueError:
+        return None
+    if not parsed.hostname:
+        return None
+    if parsed.username or parsed.password:
+        return None
+    if parsed.query or parsed.fragment:
+        return None
+    if parsed.path not in {"", "/"}:
+        return None
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", "")).rstrip("/")
 
 
 def lan_ip_candidates() -> list[str]:
@@ -81,7 +117,7 @@ def find_admin_user() -> str | None:
 
 
 def mint_token(owner: str, name: str = "companion") -> tuple[str, str]:
-    """Create a chat-scoped API token row and return (token_id, raw_token).
+    """Create a companion-scoped API token row and return (token_id, raw_token).
 
     The raw token is returned ONCE -- only its bcrypt hash + an 8-char prefix
     are persisted. Mirrors routes/api_token_routes.py so cookie- and
@@ -106,9 +142,12 @@ def mint_token(owner: str, name: str = "companion") -> tuple[str, str]:
     return token_id, raw_token
 
 
-def pairing_payload(host: str, port: int, token: str) -> dict:
+def pairing_payload(host: str, port: int, token: str, *, base_url: str | None = None) -> dict:
     """The exact JSON a client scans / accepts. Keep keys stable."""
-    return {"v": PAIRING_VERSION, "host": host, "port": port, "token": token}
+    payload = {"v": PAIRING_VERSION, "host": host, "port": port, "token": token}
+    if base_url:
+        payload["base_url"] = base_url
+    return payload
 
 
 def pairing_qr_png_data_uri(payload: dict) -> str | None:

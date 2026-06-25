@@ -310,14 +310,23 @@ class AuthManager:
             # keep the user/session state intact so the admin can retry.
             try:
                 from core.database import get_db_session, ApiToken
+                from companion.keys import delete_owner_device_keys
                 with get_db_session() as db:
                     removed_tokens = db.query(ApiToken).filter(ApiToken.owner == username).delete()
+                    removed_keys, removed_nonces = delete_owner_device_keys(db, username)
                 if removed_tokens:
                     logger.info(
                         f"Revoked {removed_tokens} API token(s) owned by deleted user '{username}'"
                     )
+                if removed_keys:
+                    logger.info(
+                        "Revoked %d companion key(s) and %d nonce(s) owned by deleted user '%s'",
+                        removed_keys,
+                        removed_nonces,
+                        username,
+                    )
             except Exception:
-                logger.warning(f"Failed to revoke API tokens for deleted user '{username}'")
+                logger.warning(f"Failed to revoke API/companion credentials for deleted user '{username}'")
                 return False
             del self._config["users"][username]
             self._save()
