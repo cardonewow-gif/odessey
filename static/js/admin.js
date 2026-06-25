@@ -6,6 +6,7 @@ import settingsModule from './settings.js';
 import { providerLogo, providerLogoFromUrl } from './providers.js';
 import { sortModelObjects } from './modelSort.js';
 import { PROVIDER_DEVICE_FLOWS, formatDeviceFlowError, runProviderDeviceFlow } from './providerDeviceFlow.js';
+import dashboardModule from './dashboard.js';
 
 let initialized = false;
 let modalEl = null;
@@ -3056,6 +3057,7 @@ export function _initData() {
 export function open(tab) {
   _initData();
   settingsModule.open(tab || 'services');
+  if (tab === 'dashboard') dashboardModule.initDashboard();
 }
 
 export function close() {
