@@ -564,6 +564,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     let timedOut = false;
     let processingProbeTimer = null;
     let processingProbeAbort = null;
+    // Hoisted so the catch block can stop streaming TTS on abort/error. The
+    // value is assigned inside the try below; a try-scoped `const` would be out
+    // of scope in catch and throw a ReferenceError there, which swallowed every
+    // abort message (timeout / offline / recovery) before it could render.
+    let streamingTTS = false;
     let _renderStream = () => {};
     let _cancelThinkingTimer = () => {};
     let _removeThinkingSpinner = () => {};
@@ -1026,7 +1031,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let isThinking = false;
       let thinkingStartTime = null;
       // Streaming TTS: synthesize sentence-by-sentence during streaming
-      const streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
+      streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
       if (streamingTTS) window.aiTTSManager.streamingStart();
       // Multi-bubble agent tracking
       let roundHolder = holder;       // Current AI text bubble (changes per round)
