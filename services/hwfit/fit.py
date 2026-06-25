@@ -676,6 +676,8 @@ def rank_models(system, use_case=None, limit=50, search=None, sort="score", quan
         "INT4", "INT8", "W4A16", "W8A8", "W8A16",
     ))
 
+    if not isinstance(system, dict):
+        system = {}
     system_backend = (system.get("backend") or "").lower()
     apple_silicon = system_backend in ("mps", "metal", "apple")
     rocm = system_backend == "rocm"
@@ -741,7 +743,7 @@ def rank_models(system, use_case=None, limit=50, search=None, sort="score", quan
             if quant in ("INT4", "INT8", "W4A16", "W8A8", "W8A16") and native_q != quant:
                 continue
 
-        if search:
+        if isinstance(search, str) and search:
             name = m.get("name", "").lower()
             provider = m.get("provider", "").lower()
             if search.lower() not in name and search.lower() not in provider:
