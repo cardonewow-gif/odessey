@@ -342,11 +342,56 @@ def _parse_qualified_mcp_args(tool: str, content: str) -> tuple[Dict, Optional[s
         return {}, None
     return parsed, None
 
+# Builtin tools that must run under the TRUSTED, server-side caller owner — never a
+# model-supplied one. The image generator resolves the caller's private endpoints/keys
+# and tags the gallery row with the owner, so `_owner` is a server-only arg.
+_OWNER_SCOPED_TOOLS = {"generate_image"}
+# Their fully-qualified mcp__ names, so a model that calls the tool by its qualified
+# name through the generic mcp__ dispatch path gets the same enforcement.
+_OWNER_SCOPED_QUALIFIED = {
+    f"mcp__{_MCP_TOOL_MAP[t][0]}__{_MCP_TOOL_MAP[t][1]}" for t in _OWNER_SCOPED_TOOLS
+}
+
+
+def _apply_trusted_owner(name: str, args: Dict, owner: Optional[str]) -> Dict:
+    """Enforce the trusted-owner contract for owner-scoped tools on BOTH dispatch
+    paths — the builtin name (via _call_mcp_tool) and a model-issued fully-qualified
+    ``mcp__…`` call. `_owner` is server-side-only: drop any model-supplied value, then
+    inject the trusted caller owner for owner-scoped tools. Without this a direct
+    ``mcp__image_gen__generate_image`` call could spoof `_owner` to resolve another
+    user's image endpoint/key and mis-tag the gallery row (#4123 review)."""
+    if not isinstance(args, dict):
+        return args
+    args = {k: v for k, v in args.items() if k != "_owner"}
+    if owner and (name in _OWNER_SCOPED_TOOLS or name in _OWNER_SCOPED_QUALIFIED):
+        args["_owner"] = owner
+    return args
+
 
 def _parse_generate_image(content: str) -> Dict:
+    # Native tool-callers (supports_tools=True endpoints) deliver args as a JSON
+    # object string (function_call_to_tool_block's default serialization) and may
+    # include `model` (enum-constrained to installed models). Fenced/local callers
+    # deliver the positional text form: line 1 = prompt, line 2 = size, line 3 =
+    # quality — NO model line (the fenced prompt tells them not to name a model;
+    # the server auto-selects). Accept JSON first, else positional. A stray size
+    # token never lands in `model` this way, so a dropped line can't shift fields.
+    stripped = content.strip()
+    if stripped.startswith("{"):
+        try:
+            obj = json.loads(stripped)
+            if isinstance(obj, dict) and obj.get("prompt"):
+                args = {"prompt": str(obj["prompt"]).strip()}
+                for key in ("model", "size", "quality"):
+                    val = obj.get(key)
+                    if val:
+                        args[key] = str(val).strip()
+                return args
+        except (ValueError, TypeError):
+            pass
     lines = content.strip().split("\n")
     args = {"prompt": lines[0].strip() if lines else ""}
-    for i, key in enumerate(["model", "size", "quality"], 1):
+    for i, key in enumerate(["size", "quality"], 1):
         if len(lines) > i and lines[i].strip():
             args[key] = lines[i].strip()
     return args
@@ -400,6 +445,7 @@ async def _call_mcp_tool(
     tool: str,
     content: str,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    owner: Optional[str] = None,
 ) -> Dict:
     """Route a legacy tool call through the MCP manager, with direct fallbacks."""
     mcp = get_mcp_manager()
@@ -409,6 +455,11 @@ async def _call_mcp_tool(
     server_id, tool_name = _MCP_TOOL_MAP[tool]
     qualified = f"mcp__{server_id}__{tool_name}"
     args = _build_mcp_args(tool, content)
+    # Enforce the trusted, server-side owner for owner-scoped tools (the image
+    # generator must resolve the *caller's* endpoints and tag the gallery row with
+    # the owner, never a model-supplied value). Centralised in _apply_trusted_owner
+    # so the generic mcp__ path applies the identical scrub-and-inject (#4123 review).
+    args = _apply_trusted_owner(tool, args, owner)
     result = await mcp.call_tool(qualified, args)
 
     # If MCP server not connected, try direct fallback
@@ -753,7 +804,7 @@ async def _execute_tool_block_impl(
     if tool in _MCP_TOOL_MAP:
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
-        result = await _call_mcp_tool(tool, content, progress_cb=progress_cb)
+        result = await _call_mcp_tool(tool, content, progress_cb=progress_cb, owner=owner)
     elif tool in ("grep", "glob", "ls", "get_workspace"):
         # Code-navigation tools — no MCP server; run the direct implementation.
         first_line = content.split(chr(10))[0][:80]
@@ -895,6 +946,10 @@ async def _execute_tool_block_impl(
             if parse_error:
                 result = {"error": parse_error, "exit_code": 1}
             else:
+                # A model can issue a fully-qualified mcp__… call directly; apply the
+                # trusted-owner scrub/inject the builtin path uses so it can't spoof
+                # `_owner` on an owner-scoped builtin (e.g. mcp__image_gen__generate_image).
+                args = _apply_trusted_owner(tool, args, owner)
                 if tool.startswith("mcp__email__") and owner:
                     args = dict(args)
                     args[_EMAIL_MCP_OWNER_ARG] = owner

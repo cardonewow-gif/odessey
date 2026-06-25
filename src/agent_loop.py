@@ -403,11 +403,10 @@ Suggest changes with explanations (for review/feedback requests).""",
     "generate_image": """\
 ```generate_image
 <prompt>
-<model>
 <size>
 <quality>
 ```
-Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
+Generate an image. Line 1 = description, line 2 = WxH (e.g. 1024x1024), line 3 = quality. The server picks the installed image model automatically — do not name a model.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
@@ -2496,6 +2495,13 @@ async def stream_agent_loop(
     # so the user can resume instead of the turn silently stalling.
     _exhausted_rounds = False
 
+    # Installed image models for the generate_image enum (Fix: stop the agent
+    # inventing model names). Resolved LAZILY — only the first round that actually
+    # sends generate_image triggers the (cached, off-event-loop) lookup, so the
+    # many turns that never touch images don't probe image endpoints at all.
+    # None = not yet computed; [] = computed but none found (enum omitted).
+    _image_model_ids = None
+
     for round_num in range(1, max_rounds + 1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
@@ -2550,6 +2556,25 @@ async def stream_agent_loop(
                     if t.get("function", {}).get("name") not in disabled_tools
                     and t.get("name") not in disabled_tools
                 ]
+            # Constrain generate_image's `model` param to the actually-installed
+            # image models so the agent can't invent a name the backend lacks.
+            # Only now — once we know generate_image is actually being sent this
+            # round — do we resolve the model list (lazily, at most once per turn).
+            # Fails open if none are found.
+            if any(t.get("function", {}).get("name") == "generate_image" for t in all_tool_schemas):
+                if _image_model_ids is None:
+                    try:
+                        from src.ai_interaction import list_image_model_ids
+                        _image_model_ids = await asyncio.to_thread(list_image_model_ids, owner)
+                    except Exception as _img_e:
+                        logger.debug(f"image-model list lookup skipped: {_img_e}")
+                        _image_model_ids = []
+                if _image_model_ids:
+                    try:
+                        from src.tool_schemas import with_image_model_enum
+                        all_tool_schemas = with_image_model_enum(all_tool_schemas, _image_model_ids)
+                    except Exception as _enum_e:
+                        logger.debug(f"image-model enum injection skipped: {_enum_e}")
         else:
             # Local: only MCP schemas when message suggests MCP tool usage
             _last_content = _last_user.lower()

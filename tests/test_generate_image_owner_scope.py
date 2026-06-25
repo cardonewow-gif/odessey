@@ -1,0 +1,196 @@
+"""Native generate_image must resolve endpoints and tag the gallery row with the
+CALLER's owner — not whichever endpoint resolves first. Owner is threaded as a
+TRUSTED, server-side value (the `_owner` arg injected by the tool-execution
+bridge), never a model-controlled schema field, so a model can't spoof it to
+reach another user's private image endpoint/API key (security review on #4123).
+"""
+
+import asyncio
+import inspect
+from unittest.mock import patch
+
+import pytest
+
+import src.agent_loop  # noqa: F401  (import-order: tool_schemas is circular)
+import mcp_servers.image_gen_server as srv
+import src.tool_execution as te
+
+
+def _run(coro):
+    try:
+        return asyncio.run(coro)
+    except Exception:
+        return None
+
+
+def test_server_uses_trusted_underscore_owner_not_model_owner():
+    """`_owner` (trusted) wins; a model-supplied `owner` key is ignored."""
+    captured = {}
+
+    def fake_resolve(spec, owner=None):
+        captured.setdefault("owner", owner)
+        raise ValueError("short-circuit before any network call")
+
+    # Pin the settings call_tool reads (the image_gen_enabled gate + load_settings) so
+    # it always reaches _resolve_model. They come from a process-wide cache another test
+    # can leave dirty; if image_gen_enabled reads falsy, call_tool short-circuits before
+    # resolution and this becomes a false negative — observed as a CI-only isolation flake.
+    with patch("src.ai_interaction._resolve_model", fake_resolve), \
+         patch("src.settings.get_setting", lambda k, d=None: True if k == "image_gen_enabled" else d), \
+         patch("src.settings.load_settings", lambda: {}):
+        _run(srv.call_tool("generate_image",
+                           {"prompt": "a cat", "_owner": "alice", "owner": "bob"}))
+    assert captured.get("owner") == "alice"
+
+
+def test_server_ignores_model_owner_without_trusted_injection():
+    """Without the bridge's `_owner`, a model-supplied `owner` does NOT scope resolution."""
+    captured = {}
+
+    def fake_resolve(spec, owner=None):
+        captured.setdefault("owner", owner)
+        raise ValueError("short-circuit")
+
+    with patch("src.ai_interaction._resolve_model", fake_resolve), \
+         patch("src.settings.get_setting", lambda k, d=None: True if k == "image_gen_enabled" else d), \
+         patch("src.settings.load_settings", lambda: {}):
+        _run(srv.call_tool("generate_image", {"prompt": "a cat", "owner": "bob"}))
+    assert captured.get("owner") is None
+
+
+def test_bridge_injects_only_underscore_owner_for_generate_image():
+    """The bridge injects the trusted `_owner` (and only for generate_image). Tested on
+    the arg-build step so it's free of the MCP-manager/get_mcp_manager dependency that
+    pollutes across the suite: a generate_image arg dict never carries a model-supplied
+    owner, and the schema never exposes one."""
+    import json
+    # _parse_generate_image (the MCP arg builder) only keeps prompt/model/size/quality,
+    # so a model can't smuggle an owner through the args channel.
+    args = te._parse_generate_image(json.dumps({"prompt": "a cat", "_owner": "x", "owner": "y"}))
+    assert "_owner" not in args and "owner" not in args
+    # The native generate_image schema must NOT expose owner as a model-controlled field.
+    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+    gi = next(s for s in FUNCTION_TOOL_SCHEMAS if s.get("function", {}).get("name") == "generate_image")
+    assert "owner" not in gi["function"]["parameters"]["properties"]
+    assert "_owner" not in gi["function"]["parameters"]["properties"]
+
+
+# Source-inspection guards (matching the repo idiom in test_ai_interaction_owner_scope):
+# that file pins do_generate_image (the UI path) as owner-scoped, but the AGENT path runs
+# the image MCP server, which it does NOT cover. These pin the agent path so the #4123
+# regression can't silently return.
+
+def test_mcp_image_server_threads_trusted_owner():
+    """The image MCP server's call_tool must read the trusted `_owner` and use it for both
+    endpoint resolution and the gallery row."""
+    src = inspect.getsource(srv.call_tool)
+    assert 'arguments.get("_owner")' in src            # trusted owner, not a schema field
+    assert "_resolve_model(cand, owner=owner)" in src  # owner-scoped resolution
+    assert "owner=owner," in src                       # GalleryImage tagged with the owner
+
+
+def test_bridge_applies_trusted_owner_via_helper():
+    """Both dispatch paths delegate owner enforcement to _apply_trusted_owner so they
+    scrub/inject identically: the builtin-name wrapper (_call_mcp_tool) and the generic
+    qualified mcp__ branch (_execute_tool_block_impl). Guards the #4123 P2 — a direct
+    `mcp__image_gen__generate_image` call must not bypass owner injection."""
+    assert "_apply_trusted_owner(tool, args, owner)" in inspect.getsource(te._call_mcp_tool)
+    assert "_apply_trusted_owner(tool, args, owner)" in inspect.getsource(te._execute_tool_block_impl)
+
+
+def test_apply_trusted_owner_qualified_image_call_cannot_spoof_owner():
+    """P2 regression (qualified name): a model-issued `mcp__image_gen__generate_image`
+    call carrying a spoofed `_owner` has it dropped and replaced with the trusted owner."""
+    qualified = "mcp__image_gen__generate_image"
+    assert qualified in te._OWNER_SCOPED_QUALIFIED
+    out = te._apply_trusted_owner(qualified, {"prompt": "a cat", "_owner": "attacker"}, "alice")
+    assert out["_owner"] == "alice"          # trusted owner wins
+    assert out["prompt"] == "a cat"          # real args preserved
+
+
+def test_apply_trusted_owner_builtin_name_cannot_spoof_owner():
+    """P1 path (builtin name): same scrub/inject for the friendly `generate_image` name."""
+    out = te._apply_trusted_owner("generate_image", {"_owner": "attacker"}, "alice")
+    assert out["_owner"] == "alice"
+
+
+def test_apply_trusted_owner_strips_owner_from_non_scoped_tool():
+    """A model-supplied `_owner` is never honoured for a non-owner-scoped mcp__ tool —
+    it's stripped, not re-injected (the field is server-side-only for any tool)."""
+    out = te._apply_trusted_owner("mcp__filesystem__read_file", {"path": "/x", "_owner": "attacker"}, "alice")
+    assert "_owner" not in out
+    assert out["path"] == "/x"
+
+
+def test_apply_trusted_owner_no_owner_strips_spoofed():
+    """With no trusted owner to inject, a spoofed `_owner` is still dropped."""
+    out = te._apply_trusted_owner("mcp__image_gen__generate_image", {"_owner": "attacker"}, None)
+    assert "_owner" not in out
+
+
+def test_resolve_model_isolates_private_image_endpoint_by_owner():
+    """Gold-standard runtime isolation (real owner_filter SQL on an in-memory DB).
+
+    A private image endpoint owned by 'alice' must be invisible to 'bob', so the
+    agent path — which now threads the caller's owner — never resolves bob's
+    request to alice's endpoint or transmits alice's API key. Reproduces the
+    #4123 P1 (the ownerless path leaks) and proves the fix closes it.
+    """
+    import httpx
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import src.ai_interaction as ai
+    import src.database as dbmod
+    # `src.database` is stubbed with MagicMocks in the test harness (see conftest);
+    # use the real ORM class from core.database and point the stub at it so
+    # _resolve_model's `from src.database import ...` resolves to real objects.
+    from core.database import ModelEndpoint
+
+    engine = create_engine("sqlite:///:memory:")
+    ModelEndpoint.metadata.create_all(engine, tables=[ModelEndpoint.__table__])
+    TestSession = sessionmaker(bind=engine)
+    s = TestSession()
+    s.add(ModelEndpoint(
+        id="ep-alice", name="alice-private-img",
+        base_url="http://alice-private:8080/v1", api_key="ALICE-SECRET-KEY",
+        is_enabled=True, model_type="image", owner="alice",
+    ))
+    s.commit()
+    s.close()
+
+    probes = []
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"id": "alice-image-model"}]}
+
+    def _fake_get(url, headers=None, timeout=None, **kw):
+        probes.append((headers or {}).get("Authorization"))
+        return _Resp()
+
+    with patch.object(dbmod, "SessionLocal", TestSession), \
+         patch.object(dbmod, "ModelEndpoint", ModelEndpoint), \
+         patch.object(ai, "resolve_endpoint_runtime", lambda ep, owner=None: (ep.base_url, ep.api_key)), \
+         patch.object(httpx, "get", _fake_get):
+        # alice resolves her OWN endpoint, with her key
+        _url, mid, hdrs = ai._resolve_model("alice-image-model", owner="alice")
+        assert mid == "alice-image-model"
+        assert hdrs.get("Authorization") == "Bearer ALICE-SECRET-KEY"
+
+        # bob is BLOCKED and never even probes alice's endpoint -> prompt + key never sent
+        probes.clear()
+        with pytest.raises(ValueError):
+            ai._resolve_model("alice-image-model", owner="bob")
+        assert probes == []
+
+        # Contract: an OWNERLESS call (what the pre-fix MCP server did) is unscoped and
+        # leaks alice's endpoint+key — which is exactly why the fix threads owner.
+        _u2, mid2, hdrs2 = ai._resolve_model("alice-image-model", owner=None)
+        assert mid2 == "alice-image-model"
+        assert hdrs2.get("Authorization") == "Bearer ALICE-SECRET-KEY"

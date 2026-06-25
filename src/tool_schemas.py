@@ -977,6 +977,23 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "generate_image",
+            "description": "Generate an AI image from a text prompt. Art, illustrations, photos.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Description of the image to generate"},
+                    "model": {"type": "string", "description": "Optional. Leave empty to use the server's configured image model. If set, must be one of the installed image models (the agent path injects the valid list as an enum) — do not guess a name."},
+                    "size": {"type": "string", "description": "Image dimensions as WxH, e.g. 1024x1024 (optional)"},
+                    "quality": {"type": "string", "description": "Image quality (optional)"},
+                },
+                "required": ["prompt"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "edit_image",
             "description": "Edit a gallery image: upscale, remove background, inpaint, or harmonize.",
             "parameters": {
@@ -1204,6 +1221,33 @@ FUNCTION_TOOL_SCHEMAS = [
         }
     },
 ]
+
+
+def with_image_model_enum(schemas, image_model_ids):
+    """Return a copy of ``schemas`` with generate_image's ``model`` param
+    constrained to ``image_model_ids`` (an enum).
+
+    The agent (esp. small native-tool models) otherwise fills the free-form
+    ``model`` string with a famous name from its training prior (DALL-E 3,
+    stable-diffusion-*, ...) that the backend doesn't have, which hard-fails at
+    resolution. Pinning the enum to the actually-installed models stops that at
+    the tool-calling layer. Fails open: if ``image_model_ids`` is empty we return
+    the schemas unchanged (no enum) so the tool is never blocked. Only the
+    generate_image schema is deep-copied; the rest are passed through by
+    reference (callers treat schemas as read-only).
+    """
+    if not image_model_ids:
+        return schemas
+    import copy
+    out = []
+    for s in schemas:
+        if s.get("function", {}).get("name") == "generate_image":
+            s = copy.deepcopy(s)
+            props = s.get("function", {}).get("parameters", {}).get("properties", {})
+            if "model" in props:
+                props["model"]["enum"] = list(image_model_ids)
+        out.append(s)
+    return out
 
 
 # ---------------------------------------------------------------------------

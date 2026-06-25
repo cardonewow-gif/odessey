@@ -161,6 +161,82 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
         db.close()
 
 
+# Short cache so the per-request schema enum injection doesn't hit the DB /
+# image endpoints on every agent turn. Endpoints change rarely.
+_IMAGE_MODELS_CACHE: Dict[str, Tuple[float, list]] = {}
+_IMAGE_MODELS_TTL = 60.0
+
+
+def list_image_model_ids(owner: Optional[str] = None) -> list:
+    """Return the ids of image models the deployment actually has installed.
+
+    Queries enabled ``model_type=='image'`` endpoints' /models, plus the
+    admin-configured ``image_model`` (kept first). Used to enum-constrain the
+    generate_image tool's ``model`` param so the agent can't invent names the
+    backend doesn't have (which hard-fail at resolution). Best-effort: returns
+    [] on any error so callers fail open (no enum) rather than blocking the tool.
+    """
+    key = owner or ""
+    now = time.monotonic()
+    cached = _IMAGE_MODELS_CACHE.get(key)
+    if cached and (now - cached[0]) < _IMAGE_MODELS_TTL:
+        return list(cached[1])
+
+    # Probe what the enabled image endpoints actually serve (authenticated — mirror
+    # _resolve_model so auth-gated cloud endpoints aren't silently dropped). These
+    # are the real, valid ids; case-insensitive dedup avoids near-duplicates.
+    probed: list = []
+    seen = set()
+    try:
+        import httpx as _req
+        from src.database import SessionLocal, ModelEndpoint
+        from src.auth_helpers import owner_filter
+        _db = SessionLocal()
+        try:
+            q = _db.query(ModelEndpoint).filter(
+                ModelEndpoint.is_enabled == True,  # noqa: E712
+                ModelEndpoint.model_type == "image",
+            )
+            if owner:
+                q = owner_filter(q, ModelEndpoint, owner)
+            for ep in q.all():
+                try:
+                    base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+                    murl = build_models_url(base)
+                    if not murl:
+                        continue
+                    r = _req.get(murl, headers=build_headers(api_key, base), timeout=3)
+                    r.raise_for_status()
+                    for m in (r.json().get("data") or []):
+                        mid = m.get("id")
+                        if mid and mid.lower() not in seen:
+                            seen.add(mid.lower())
+                            probed.append(mid)
+                except Exception:
+                    continue
+        finally:
+            _db.close()
+    except Exception:
+        pass
+
+    # Prefer the actually-served ids. Only when probing yields nothing (endpoint
+    # down/unauthorized) fall back to the admin-configured model so the tool is
+    # never blocked — but don't advertise an unvalidated/stale configured name
+    # alongside real ids.
+    if probed:
+        ids = probed
+    else:
+        try:
+            from src.settings import get_setting
+            cfg = (get_setting("image_model", "") or "").strip()
+            ids = [cfg] if cfg else []
+        except Exception:
+            ids = []
+
+    _IMAGE_MODELS_CACHE[key] = (now, list(ids))
+    return ids
+
+
 # ---------------------------------------------------------------------------
 # Tool implementations
 # ---------------------------------------------------------------------------
