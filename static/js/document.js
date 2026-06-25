@@ -94,6 +94,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   }
 
   async function _resolveComposeSendAccountId() {
+    const fromRow = document.getElementById('doc-email-from-row');
+    const fromSelect = document.getElementById('doc-email-from');
+    if (fromRow && fromRow.style.display !== 'none' && fromSelect?.value) {
+      return fromSelect.value;
+    }
     const activeAccountId = window.__odysseusActiveEmailAccount || null;
     if (!activeAccountId) return null;
     const accounts = await _getEmailAccountsCached();
@@ -101,6 +106,33 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (!activeAccount || _accountCanSend(activeAccount)) return activeAccountId;
     if (uiModule) uiModule.showToast('Selected email account is receive-only; using your SMTP account.');
     return null;
+  }
+
+  async function _populateFromDropdown(doc) {
+    const fromRow = document.getElementById('doc-email-from-row');
+    const fromSelect = document.getElementById('doc-email-from');
+    if (!fromRow || !fromSelect) return;
+    const accounts = await _getEmailAccountsCached();
+    const sendable = accounts.filter(a => _accountCanSend(a) && a.enabled !== false);
+    if (sendable.length <= 1) {
+      fromRow.style.display = 'none';
+      return;
+    }
+    const preferredId = doc?._draftAccountId || doc?.sourceEmailAccountId || window.__odysseusActiveEmailAccount || null;
+    fromSelect.innerHTML = '';
+    for (const acc of sendable) {
+      const opt = document.createElement('option');
+      opt.value = String(acc.id);
+      const addr = acc.from_address || acc.imap_user || '';
+      opt.textContent = acc.name ? `${acc.name} <${addr}>` : addr;
+      if (preferredId && String(acc.id) === String(preferredId)) opt.selected = true;
+      fromSelect.appendChild(opt);
+    }
+    if (!sendable.find(a => String(a.id) === String(fromSelect.value))) {
+      const def = sendable.find(a => a.is_default) || sendable[0];
+      if (def) fromSelect.value = String(def.id);
+    }
+    fromRow.style.display = '';
   }
 
   // Inject tab menu styles immediately (must exist before any hover)
@@ -2511,6 +2543,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     document.getElementById('doc-editor-code')?.classList.add('email-mode');
     document.getElementById('doc-editor-highlight')?.classList.add('email-mode');
     const fields = _parseEmailHeader(doc.content || '');
+    _populateFromDropdown(doc).catch(() => {});
     const toInput = document.getElementById('doc-email-to');
     const subjectInput = document.getElementById('doc-email-subject');
     const inReplyTo = document.getElementById('doc-email-in-reply-to');
@@ -3074,6 +3107,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       const proceed = await _confirmMissingAttachment();
       if (!proceed) return;
     }
+    const selectedAccountId = await _resolveComposeSendAccountId();
     const btn = document.getElementById('doc-email-send-btn');
     const _sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
     let sendSpinner = null;
@@ -3108,7 +3142,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         return;
       }
 
-      const activeAccountId = await _resolveComposeSendAccountId();
+      const activeAccountId = selectedAccountId;
       const res = await fetch(`${API_BASE}/api/email/send`, {
         method: 'POST',
         credentials: 'same-origin',
@@ -3236,7 +3270,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           body_html: bodyHtml,
           in_reply_to: inReplyTo || null,
           references: references || null,
-          account_id: window.__odysseusActiveEmailAccount || null,
+          account_id: await _resolveComposeSendAccountId(),
         }),
       });
       const data = await res.json();
@@ -4064,6 +4098,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           <span id="doc-email-collapse-summary" class="doc-email-collapse-summary">No recipient · No subject</span>
         </button>
         <div id="doc-email-fields" class="doc-email-fields">
+          <div class="email-field" id="doc-email-from-row" style="display:none">
+            <label>From</label>
+            <select id="doc-email-from" class="email-field-select"></select>
+          </div>
           <div class="email-field" style="position:relative">
             <span class="email-field-prefix">To</span>
             <input type="text" id="doc-email-to" placeholder="recipient@example.com" autocomplete="off" />
