@@ -578,7 +578,7 @@ export async function refreshModels(force = false) {
       if (welcomeSub) welcomeSub.textContent = 'Yours for the voyage.';
       const welcomeTip = document.getElementById('welcome-tip');
       if (welcomeTip) {
-        const tips = window.innerWidth <= 768
+        let tips = window.innerWidth <= 768
           ? [
               'Tip: Long-press a session for rename, delete, and memory options.',
               'Tip: Tap the eye icon for Nobody mode - no history saved.',
@@ -586,12 +586,17 @@ export async function refreshModels(force = false) {
               'Tip: Attach images or files using the + button next to the input.',
             ]
           : [
+              'Tip: Double-tap Shift to search everything - windows, settings, actions.',
               'Tip: Press Ctrl+K to search across all your conversations.',
               'Tip: Press Ctrl+B to quickly toggle the sidebar.',
               'Tip: Shift-click the sidebar toggle to swap it to the other side.',
               'Tip: Drag and drop files onto the chat to attach them.',
               'Tip: Right-click a session for rename, delete, and memory options.',
             ];
+        // Don't promote double-Shift to users who disabled it in Shortcuts.
+        if (window._odyDoubleShiftDisabled === true) {
+          tips = tips.filter(t => !t.includes('Double-tap Shift'));
+        }
         welcomeTip.textContent = tips[Math.floor(Math.random() * tips.length)];
       }
     }

@@ -2,6 +2,7 @@
 
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
+import commandPaletteModule from './command-palette.js';
 
 let API_BASE = '';
 let debounceTimer = null;
@@ -14,6 +15,10 @@ export function openSearch() {
   const overlay = el('search-overlay');
   if (!overlay) return;
   overlay.classList.remove('hidden');
+  // Don't promote double-Shift to users who disabled it in Shortcuts.
+  // Re-checked on every open so the toggle takes effect immediately.
+  const hint = el('search-footer-hint');
+  if (hint) hint.hidden = window._odyDoubleShiftDisabled === true;
   const input = el('search-input');
   if (input) {
     input.value = '';
@@ -187,6 +192,15 @@ export function init(apiBase) {
   if (overlay) {
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) closeSearch();
+    });
+  }
+
+  // Mobile entry point to Search Everywhere (no hardware Shift to double-tap).
+  const everywhereBtn = el('search-everywhere-btn');
+  if (everywhereBtn) {
+    everywhereBtn.addEventListener('click', () => {
+      closeSearch();
+      commandPaletteModule.open();
     });
   }
 }

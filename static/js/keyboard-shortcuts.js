@@ -9,11 +9,62 @@ const _defaultKeybinds = {
   fav_session: 'ctrl+alt+f', delete_session: 'ctrl+alt+d',
   cancel: 'escape', tts: 'alt+shift+t',
   incognito: 'ctrl+alt+i', settings: 'ctrl+,', focus_input: 'ctrl+/',
+  // Command palette (Search Everywhere). Empty = double-Shift only; a bound
+  // combo ALSO opens it. Registered in settings.js SHORTCUT_DEFAULTS/LABELS
+  // too — these maps are separate and must not drift.
+  search_everywhere: '',
   // Open-tool shortcuts (Calendar bound by default; rest unbound).
   open_calendar: 'ctrl+alt+c', open_compare: '', open_cookbook: '',
   open_research: '', open_gallery: '', open_library: '', open_memory: '',
   open_notes: '', open_tasks: '', open_theme: '',
 };
+
+// ── "Toggle Window" / command-palette map — each tool window's modal element
+// → the button/title that opens it (mirrors modalManager's _AUTO_WIRE, plus
+// email's section title). Module-scope + exported so command-registry.js can
+// build palette items from the same single source of trigger IDs.
+export const _WINDOW_TRIGGERS = {
+  'settings-modal':         'user-bar-settings',
+  'theme-modal':            'tool-theme-btn',
+  'tasks-modal':            'tool-tasks-btn',
+  'notes-panel':            'tool-notes-btn',
+  'memory-modal':           'tool-memory-btn',
+  'doclib-modal':           'tool-library-btn',
+  'gallery-modal':          'tool-gallery-btn',
+  'research-overlay':       'tool-research-btn',
+  'cookbook-modal':         'tool-cookbook-btn',
+  'compare-model-overlay':  'tool-compare-btn',
+  'calendar-modal':         'tool-calendar-btn',
+  'email-lib-modal':        'email-section-title',
+};
+
+// ── Double-Shift detector (pure decision core, exported for tests) ──
+// Two ShiftLeft/ShiftRight keydowns within `windowMs`, where the FIRST shift's
+// keyup already fired (protects Shift-pause-Shift while typing capitals).
+// Resets on: any non-Shift keydown, repeat, alt/ctrl/meta held (protects
+// alt+shift+t TTS), IME composition. Callers must also reset on window blur
+// and visibilitychange (alt-tab between presses).
+//
+// state: {lastShiftAt: number|null, firstReleased} | null. Returns {open, state}.
+export function _shiftPulse(state, ev, now, windowMs = 350) {
+  const s = state || { lastShiftAt: null, firstReleased: false };
+  const fresh = { lastShiftAt: null, firstReleased: false };
+  const isShift = ev.code === 'ShiftLeft' || ev.code === 'ShiftRight';
+
+  if (ev.type === 'keyup') {
+    if (isShift && s.lastShiftAt !== null) return { open: false, state: { ...s, firstReleased: true } };
+    return { open: false, state: s };
+  }
+  // keydown
+  if (!isShift) return { open: false, state: fresh };
+  if (ev.repeat || ev.altKey || ev.ctrlKey || ev.metaKey || ev.isComposing) {
+    return { open: false, state: fresh };
+  }
+  if (s.lastShiftAt !== null && s.firstReleased && now - s.lastShiftAt <= windowMs) {
+    return { open: true, state: fresh };
+  }
+  return { open: false, state: { lastShiftAt: now, firstReleased: false } };
+}
 
 export function _matchesCombo(e, combo, isMac = IS_MAC) {
   if (!combo) return false;
@@ -49,7 +100,7 @@ export function _matchesCombo(e, combo, isMac = IS_MAC) {
 export function initKeyboardShortcuts(modules) {
   const {
     el, Storage, sessionModule, uiModule, chatModule,
-    adminModule, settingsModule, searchChatModule,
+    adminModule, settingsModule, searchChatModule, commandPaletteModule,
     _closeCompareIfActive, _deactivateIncognito, API_BASE
   } = modules;
 
@@ -59,6 +110,13 @@ export function initKeyboardShortcuts(modules) {
   fetch('/api/auth/settings', { credentials: 'same-origin' })
     .then(r => r.json())
     .then(s => { if (s.keybinds) window._odysseusKeybinds = { ..._defaultKeybinds, ...s.keybinds }; })
+    .catch(() => {});
+
+  // Load the double-Shift disable pref (set in Settings → Shortcuts; the
+  // toggle there updates window._odyDoubleShiftDisabled live).
+  fetch('/api/prefs/disable_double_shift', { credentials: 'same-origin' })
+    .then(r => r.json())
+    .then(d => { window._odyDoubleShiftDisabled = d.value === true; })
     .catch(() => {});
 
   // ── Esc cancels select mode (capture phase, before modal-close) ──
@@ -93,22 +151,7 @@ export function initKeyboardShortcuts(modules) {
   }, true);
 
   // ── "Toggle Window" — close whatever tool window is open, or reopen the
-  // last one. Maps each window's modal element to the button/title that
-  // opens it (mirrors modalManager's _AUTO_WIRE, plus email's section title).
-  const _WINDOW_TRIGGERS = {
-    'settings-modal':         'user-bar-settings',
-    'theme-modal':            'tool-theme-btn',
-    'tasks-modal':            'tool-tasks-btn',
-    'notes-panel':            'tool-notes-btn',
-    'memory-modal':           'tool-memory-btn',
-    'doclib-modal':           'tool-library-btn',
-    'gallery-modal':          'tool-gallery-btn',
-    'research-overlay':       'tool-research-btn',
-    'cookbook-modal':         'tool-cookbook-btn',
-    'compare-model-overlay':  'tool-compare-btn',
-    'calendar-modal':         'tool-calendar-btn',
-    'email-lib-modal':        'email-section-title',
-  };
+  // last one. Uses the module-scope _WINDOW_TRIGGERS map above.
   let _lastWindow = 'settings-modal';
 
   const _windowVisible = (id) => {
@@ -141,9 +184,41 @@ export function initKeyboardShortcuts(modules) {
     }
   };
 
+  // ── Double-Shift → command palette (Search Everywhere) ──
+  // Decision logic lives in the pure _shiftPulse helper above; this block
+  // only owns the state + the open/toggle side effect.
+  let _shiftState = null;
+  const _resetShiftState = () => { _shiftState = null; };
+  window.addEventListener('blur', _resetShiftState);
+  document.addEventListener('visibilitychange', _resetShiftState);
+  document.addEventListener('keyup', (e) => {
+    _shiftState = _shiftPulse(_shiftState, e, performance.now()).state;
+  });
+
+  const _togglePalette = () => {
+    if (!commandPaletteModule) return;
+    commandPaletteModule.isOpen() ? commandPaletteModule.close() : commandPaletteModule.open();
+  };
+
   document.addEventListener('keydown', (e) => {
     const kb = window._odysseusKeybinds;
 
+    // Double-Shift first (top of listener so EVERY keydown feeds the state
+    // machine — any non-Shift key resets it). Triggers everywhere, inputs
+    // included (JetBrains parity; the settings toggle can disable it).
+    const _pulse = _shiftPulse(_shiftState, e, performance.now());
+    _shiftState = _pulse.state;
+    if (_pulse.open && window._odyDoubleShiftDisabled !== true) {
+      e.preventDefault();
+      _togglePalette();
+      return;
+    }
+
+    if (_matchesCombo(e, kb.search_everywhere)) {
+      e.preventDefault();
+      _togglePalette();
+      return;
+    }
     if (_matchesCombo(e, kb.search)) {
       e.preventDefault();
       if (searchChatModule) {

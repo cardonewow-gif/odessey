@@ -1229,6 +1229,18 @@ if (!window._odyEscExpandGuard) {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || e.defaultPrevented) return;
 
+    // Command palette (Search Everywhere) outranks everything: it sits at
+    // z-index 50000 over all modals, so Esc must close IT — checked before
+    // _closeHoveredWindow, which would otherwise close whatever modal the
+    // pointer happens to hover under the palette. close() also pops the
+    // palette's escMenuStack entry, so dismissTopMenu can't double-fire.
+    const _cmdPal = window._odyCmdPalette;
+    if (_cmdPal && _cmdPal.isOpen()) {
+      e.stopImmediatePropagation(); e.preventDefault();
+      _cmdPal.close();
+      return;
+    }
+
     // Find the single thing to close, in priority order. The first hit wins.
     // Important: if a thinking block is open we MUST handle it ourselves and
     // not fall through to closing a modal — even if its header is missing

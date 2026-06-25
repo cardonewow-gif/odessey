@@ -14,6 +14,8 @@ import chatModule from './js/chat.js';
 import compareModule from './js/compare/index.js';
 import documentModule from './js/document.js';
 import searchChatModule from './js/search-chat.js';
+import commandPaletteModule from './js/command-palette.js';
+import { initSettingsIndex } from './js/settings-index.js';
 import { makeWindowDraggable } from './js/windowDrag.js';
 import markdownModule from './js/markdown.js';
 import chatRenderer from './js/chatRenderer.js';
@@ -26,7 +28,7 @@ import tasksModule from './js/tasks.js';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js';
-import settingsModule from './js/settings.js';
+import settingsModule, { SHORTCUT_LABELS } from './js/settings.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
@@ -3327,10 +3329,14 @@ function initializeEventListeners() {
     };
   })();
 
+  // Command palette (Search Everywhere — double-Shift)
+  commandPaletteModule.init();
+  initSettingsIndex(settingsModule, SHORTCUT_LABELS);
+
   // Keyboard shortcuts (extracted to js/keyboard-shortcuts.js)
   initKeyboardShortcuts({
     el, Storage, sessionModule, uiModule, chatModule,
-    adminModule, settingsModule, searchChatModule,
+    adminModule, settingsModule, searchChatModule, commandPaletteModule,
     _closeCompareIfActive, _deactivateIncognito, API_BASE
   });
   

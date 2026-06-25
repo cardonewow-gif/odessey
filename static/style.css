@@ -6403,7 +6403,8 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       flex-direction: column;
       max-height: 60vh;
     }
-    .search-popup input#search-input {
+    .search-popup input#search-input,
+    .search-popup input#cmd-palette-input {
       width: 100%;
       background: transparent;
       border: none;
@@ -6415,7 +6416,8 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       padding: 14px 16px;
       box-sizing: border-box;
     }
-    .search-popup input#search-input::placeholder {
+    .search-popup input#search-input::placeholder,
+    .search-popup input#cmd-palette-input::placeholder {
       color: color-mix(in srgb, var(--fg) 30%, transparent);
     }
     .search-results {
@@ -6477,6 +6479,127 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       padding: 0 2px;
       font-weight: 600;
     }
+    /* Cross-promote Search Everywhere from the chat-search popup. */
+    .search-footer-hint {
+      padding: 7px 14px;
+      border-top: 1px solid var(--border);
+      font-size: 10.5px;
+      color: color-mix(in srgb, var(--fg) 40%, transparent);
+      flex-shrink: 0;
+    }
+    .search-footer-hint kbd {
+      font-family: 'Fira Code', monospace;
+      font-size: 9.5px;
+      padding: 1px 5px;
+      border: 1px solid var(--border);
+      border-bottom-width: 2px;
+      border-radius: 4px;
+      background: color-mix(in srgb, var(--fg) 6%, transparent);
+    }
+    /* Mobile entry point to Search Everywhere — replaces the double-Shift
+       text hint below (no hardware Shift on touch devices). */
+    .search-everywhere-btn {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      width: 100%;
+      padding: 9px 14px;
+      border: none;
+      border-top: 1px solid var(--border);
+      background: transparent;
+      color: color-mix(in srgb, var(--fg) 55%, transparent);
+      font-size: 11.5px;
+      font-family: 'Fira Code', monospace;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .search-everywhere-btn:active {
+      background: color-mix(in srgb, var(--fg) 6%, transparent);
+    }
+    /* Double-Shift needs a hardware keyboard — on mobile swap the text hint
+       for the tappable entry, and drop the Tab-key hint from the palette. */
+    @media (max-width: 768px) {
+      .search-footer-hint { display: none; }
+      .search-everywhere-btn { display: flex; }
+      .cmd-palette-tabs-hint { display: none; }
+      .cmd-palette-tabs { overflow-x: auto; }
+    }
+    /* ── Command palette (Search Everywhere, double-Shift) ──
+       Reuses the .search-overlay/.search-popup/.search-result-item look;
+       only palette-specific bits live below. Layer survey: .search-overlay
+       300 / base .modal 260 / ui.js _promote bumps visible modals from
+       1000+ / toasts & spinners up to 99999. The palette pins 50000: above
+       every modal, deliberately BELOW toasts so a perform()-failure toast
+       stays visible while it is open. The overlay is NOT .modal (dodges
+       the _promote auto-bump). */
+    .cmd-palette-overlay {
+      z-index: 50000;
+    }
+    .cmd-palette-overlay[hidden] { display: none; }
+    body.cmd-palette-scroll-lock { overflow: hidden; }
+    .cmd-palette-tabs {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      padding: 6px 8px 0;
+      border-bottom: 1px solid var(--border);
+      /* flex-column parent + overflow-x:auto would otherwise let this row
+         shrink to nothing when the list fills the popup's max-height. */
+      flex-shrink: 0;
+    }
+    .cmd-palette-tab {
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: color-mix(in srgb, var(--fg) 55%, transparent);
+      font-size: 11.5px;
+      font-family: inherit;
+      padding: 4px 10px 6px;
+      cursor: pointer;
+      border-radius: 4px 4px 0 0;
+    }
+    .cmd-palette-tab:hover {
+      color: var(--fg);
+      background: color-mix(in srgb, var(--fg) 5%, transparent);
+    }
+    .cmd-palette-tab.active {
+      color: var(--fg);
+      border-bottom-color: var(--accent, #e8a830);
+    }
+    .cmd-palette-tabs-hint {
+      margin-left: auto;
+      padding: 0 6px 4px;
+      font-size: 9.5px;
+      color: color-mix(in srgb, var(--fg) 30%, transparent);
+      white-space: nowrap;
+    }
+    .cmd-palette-tabs-hint kbd {
+      font-family: 'Fira Code', monospace;
+      font-size: 9px;
+      padding: 0 4px;
+      border: 1px solid var(--border);
+      border-bottom-width: 2px;
+      border-radius: 3px;
+      background: color-mix(in srgb, var(--fg) 6%, transparent);
+    }
+    .cmd-palette-empty {
+      padding: 16px 12px;
+      font-size: 12px;
+      color: color-mix(in srgb, var(--fg) 50%, transparent);
+      text-align: center;
+    }
+    /* Settings deep-link pulse — JS removes the class on animationend with a
+       timeout fallback (settings-index.js _pulse), so it can never stick. */
+    @keyframes cmd-deeplink-pulse {
+      0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, #e8a830) 75%, transparent); }
+      70%  { box-shadow: 0 0 0 7px transparent; }
+      100% { box-shadow: 0 0 0 0 transparent; }
+    }
+    .cmd-deeplink-pulse {
+      animation: cmd-deeplink-pulse 0.8s ease-out 3;
+      border-radius: 6px;
+    }
+
     /* Document library search-term highlight — clear, high-contrast. */
     mark.doclib-search-hl {
       background: var(--accent, #e8a830);

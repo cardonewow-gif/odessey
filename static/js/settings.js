@@ -1842,6 +1842,10 @@ function syncPrivacyCheckboxes() {
 
 const SHORTCUT_DEFAULTS = {
   search:         'ctrl+k',
+  // Unbound by default — double-Shift always opens the palette; a combo here
+  // is an ADDITIONAL trigger. Must stay in sync with _defaultKeybinds in
+  // keyboard-shortcuts.js.
+  search_everywhere: '',
   toggle_sidebar: 'ctrl+b',
   new_session:    'ctrl+alt+n',
   fav_session:    'ctrl+alt+f',
@@ -1867,6 +1871,7 @@ const SHORTCUT_DEFAULTS = {
 
 const SHORTCUT_ICONS = {
   search:         '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="10" cy="10" r="7"/><path d="M21 21l-4.35-4.35"/></svg>',
+  search_everywhere: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="10" cy="10" r="7"/><path d="M21 21l-4.35-4.35"/><line x1="10" y1="7" x2="10" y2="13"/><line x1="7" y1="10" x2="13" y2="10"/></svg>',
   toggle_sidebar: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>',
   new_session:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
   fav_session:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
@@ -1888,8 +1893,11 @@ const SHORTCUT_ICONS = {
   open_theme:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20 5 5 0 0 0 5-5 3 3 0 0 0-3-3h-2a3 3 0 0 1-3-3 5 5 0 0 1 5-5"/></svg>',
 };
 
-const SHORTCUT_LABELS = {
+// Exported: settings-index.js hand-declares command-palette entries for the
+// shortcuts panel from this map (the panel DOM is empty until initShortcuts).
+export const SHORTCUT_LABELS = {
   search:         'Search conversations',
+  search_everywhere: 'Search Everywhere (also double-Shift)',
   toggle_sidebar: 'Toggle sidebar',
   new_session:    'New session',
   fav_session:    'Favorite session',
@@ -1912,7 +1920,7 @@ const SHORTCUT_LABELS = {
 };
 
 const SHORTCUT_CATEGORIES = [
-  { name: 'Navigation', keys: ['search', 'toggle_sidebar', 'focus_input', 'settings'] },
+  { name: 'Navigation', keys: ['search', 'search_everywhere', 'toggle_sidebar', 'focus_input', 'settings'] },
   { name: 'Sessions', keys: ['new_session', 'fav_session', 'delete_session'] },
   { name: 'Tools', keys: ['incognito', 'tts', 'cancel'] },
   { name: 'Open Tools', keys: ['open_calendar', 'open_compare', 'open_cookbook', 'open_research', 'open_gallery', 'open_library', 'open_memory', 'open_notes', 'open_tasks', 'open_theme'] },
@@ -1954,6 +1962,32 @@ async function initShortcuts() {
   const listEl = el('shortcuts-list');
   const resetBtn = el('shortcuts-reset-btn');
   if (!listEl) return;
+
+  // ── Double-Shift (Search Everywhere) disable toggle ──
+  // Persisted via a FIELD-LEVEL /api/prefs write — deliberately NOT the
+  // /api/auth/settings GET→merge→POST blob, whose read-modify-write races
+  // across its 20+ call sites. keyboard-shortcuts.js reads the same pref at
+  // startup; the window flag keeps the running session in sync.
+  const dblShiftToggle = el('set-doubleShiftToggle');
+  if (dblShiftToggle) {
+    fetch('/api/prefs/disable_double_shift', { credentials: 'same-origin' })
+      .then(r => r.json())
+      .then(d => {
+        dblShiftToggle.checked = d.value !== true;
+        window._odyDoubleShiftDisabled = d.value === true;
+      })
+      .catch(() => {});
+    dblShiftToggle.addEventListener('change', () => {
+      const disabled = !dblShiftToggle.checked;
+      window._odyDoubleShiftDisabled = disabled;
+      fetch('/api/prefs/disable_double_shift', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ value: disabled }),
+      }).catch(() => {});
+    });
+  }
 
   // Load saved keybinds
   let keybinds = { ...SHORTCUT_DEFAULTS };
