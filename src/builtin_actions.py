@@ -2192,8 +2192,8 @@ async def action_cookbook_serve(
                     "ts": int(_time.time() * 1000),
                     "payload": {"repo_id": repo_id, "remote_host": host or "", "_cmd": cmd},
                     "remoteHost": host or "",
-                    "sshPort": "",
-                    "platform": "linux",
+                    "sshPort": str(srv.get("port") or ""),
+                    "platform": srv.get("platform") or "linux",
                     "_serveReady": False,
                     "_endpointAdded": False,
                 }
