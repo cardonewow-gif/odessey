@@ -998,7 +998,6 @@ def _llama_cpp_rebuild_cmd(update_source: bool = False) -> str:
         '(Vulkan, HIP, or CUDA will be used if a matching toolchain is now available)."'
     )
 
-
 class ModelDownloadRequest(BaseModel):
     repo_id: str
     backend: str | None = None  # "hf" (default) or "ollama"
@@ -1218,6 +1217,16 @@ def _diagnose_serve_output(text: str) -> dict | None:
             r"Either a revision or a version must be specified|transformers\.integrations\.hub_kernels|kernels/layer",
             "vLLM/Transformers kernel package mismatch.",
             [{"label": "update vLLM, Transformers, and kernels on this server", "op": "dependency", "package": "vllm transformers kernels"}],
+        ),
+        (
+            r"Could not find nvcc|CUDAToolkit_ROOT|CUDA Toolkit not found|Unable to find cudart library|CUDA_CUDART|ggml-cuda/CMakeLists\.txt|building llama-server for CPU only|GPU inference will not be available",
+            "llama.cpp CUDA toolkit/runtime is missing, so Odysseus is falling back to CPU. Docker GPU visibility only proves passthrough; llama.cpp also needs nvcc and cudart available to CMake. On AMD, this CUDA build path is not usable; use Ollama, a ROCm/Vulkan llama.cpp build, or a registered OpenAI-compatible endpoint.",
+            [{"label": "install a complete CUDA toolkit/runtime for NVIDIA, or use a non-CUDA backend for AMD", "op": "manual"}],
+        ),
+        (
+            r"exception specification is incompatible.*cospi|unsupported GNU version|gcc versions later than 13|Unsupported gpu architecture ['\"]?compute_61|unsupported gpu architecture",
+            "A CUDA toolkit was found, but it does not match this host or GPU, so the llama.cpp CUDA build fails. Two common traps: (1) the host compiler/libc is too new for an older CUDA (CUDA 12.4 and earlier against glibc 2.41+ produces the 'cospi' exception-specification error, and CUDA 12.x rejects gcc newer than 13); (2) the CUDA version is too new for the GPU (CUDA 13 dropped pre_sm_75 support, so it cannot build for Pascal sm_61 cards such as the GTX 10-series). For older NVIDIA GPUs, use CUDA 12.8+ (still supports Pascal and is compatible with glibc 2.41) and build with -DCMAKE_CUDA_ARCHITECTURES set to the card's compute capability. Otherwise skip the source build and place a prebuilt llama-server on PATH.",
+            [{"label": "match the CUDA toolkit to the host and GPU (CUDA 12.8+ for older cards), or use a prebuilt llama-server on PATH", "op": "manual"}],
         ),
         (
             r"Address already in use|bind.*address.*in use",

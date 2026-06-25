@@ -15,6 +15,7 @@ from routes.cookbook_helpers import (
     _append_serve_preflight_exit_lines,
     _llama_cpp_rebuild_cmd,
     _append_vllm_linux_preflight_lines,
+    _diagnose_serve_output,
     _local_tooling_path_export,
     _pip_install_attempt,
     _pip_install_fallback_chain,
@@ -910,3 +911,84 @@ def test_cached_model_scan_runs_additional_hf_cache(tmp_path):
     assert rec["size_bytes"] == len(b"abc123")
     assert rec["has_incomplete"] is False
     assert rec["is_diffusion"] is False
+
+
+def test_serve_diagnosis_explains_llamacpp_cuda_toolkit_failure():
+    log = """
+    -- Could not find nvcc, please set CUDAToolkit_ROOT.
+    CMake Error at ggml/src/ggml-cuda/CMakeLists.txt:268 (message):
+      CUDA Toolkit not found
+    """
+
+    diag = _diagnose_serve_output(log)
+
+    assert diag is not None
+    assert "CUDA toolkit/runtime is missing" in diag["message"]
+    assert "falling back to CPU" in diag["message"]
+    assert "Docker GPU visibility only proves passthrough" in diag["message"]
+    assert diag["suggestions"][0]["op"] == "manual"
+
+
+def test_serve_diagnosis_explains_llamacpp_cuda_runtime_failure():
+    log = """
+    [odysseus] CUDA nvcc found — building llama-server with CUDA (GPU) support...
+    -- Unable to find cudart library.
+    -- Could NOT find CUDAToolkit (missing: CUDA_CUDART) (found version "13.3.33")
+    CMake Error at ggml/src/ggml-cuda/CMakeLists.txt:268 (message):
+      CUDA Toolkit not found
+    """
+
+    diag = _diagnose_serve_output(log)
+
+    assert diag is not None
+    assert "cudart available to CMake" in diag["message"]
+    assert "falling back to CPU" in diag["message"]
+
+
+def test_serve_diagnosis_explains_llamacpp_cpu_fallback_warning():
+    log = """
+    [odysseus] WARNING: nvcc found but CUDA runtime library was not found — building llama-server for CPU only.
+    [odysseus]   GPU inference will not be available for this llama.cpp build.
+    """
+
+    diag = _diagnose_serve_output(log)
+
+    assert diag is not None
+    assert "falling back to CPU" in diag["message"]
+
+
+def test_serve_diagnosis_explains_cuda_host_glibc_cospi_failure():
+    log = """
+    -- Found CUDAToolkit: /usr/local/cuda-12.4/targets/x86_64-linux/include (found version "12.4.99")
+    -- CUDA Toolkit found
+    error: exception specification is incompatible with that of previous function "cospi"
+    """
+
+    diag = _diagnose_serve_output(log)
+
+    assert diag is not None
+    assert "does not match this host or GPU" in diag["message"]
+    assert "CUDA 12.8+" in diag["message"]
+    assert diag["suggestions"][0]["op"] == "manual"
+
+
+def test_serve_diagnosis_explains_cuda_unsupported_gcc_version():
+    log = """
+    error: #error -- unsupported GNU version! gcc versions later than 13 are not supported!
+    """
+
+    diag = _diagnose_serve_output(log)
+
+    assert diag is not None
+    assert "does not match this host or GPU" in diag["message"]
+
+
+def test_serve_diagnosis_explains_cuda_unsupported_gpu_architecture():
+    log = """
+    nvcc fatal : Unsupported gpu architecture 'compute_61'
+    """
+
+    diag = _diagnose_serve_output(log)
+
+    assert diag is not None
+    assert "Pascal sm_61" in diag["message"]

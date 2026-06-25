@@ -398,6 +398,24 @@ export const ERROR_PATTERNS = [
     ],
   },
   {
+    pattern: /Could not find nvcc|CUDAToolkit_ROOT|CUDA Toolkit not found|Unable to find cudart library|CUDA_CUDART|ggml-cuda\/CMakeLists\.txt|building llama-server for CPU only|GPU inference will not be available/i,
+    message: 'llama.cpp CUDA toolkit/runtime is missing, so Odysseus is falling back to CPU. Docker GPU visibility only proves passthrough; llama.cpp also needs nvcc and cudart available to CMake.',
+    suggestion: 'Suggested action: install a complete CUDA toolkit/runtime on NVIDIA, or use Ollama, a ROCm/Vulkan llama.cpp build, or a registered OpenAI-compatible endpoint on AMD.',
+    fixes: [
+      { label: 'Copy NVIDIA guidance', action: () => _copyText('Install a complete CUDA toolkit/runtime with nvcc and cudart available to CMake. Docker nvidia-smi only confirms GPU passthrough; it does not prove llama.cpp can build with CUDA.') },
+      { label: 'Copy AMD guidance', action: () => _copyText('This llama.cpp build attempted CUDA, which will not work on AMD/Radeon. Use Ollama, a ROCm/Vulkan llama.cpp build, or run a separate OpenAI-compatible endpoint and add it in Settings -> Add Models.') },
+    ],
+  },
+  {
+    pattern: /unsupported GNU version|gcc versions later than 13 are not supported|exception specification is incompatible.*\bcospi\b|nvcc fatal\s*:\s*Unsupported gpu architecture/i,
+    message: 'A CUDA toolkit was found, but it does not match this host or GPU, so the llama.cpp CUDA build fails. Two common traps: (1) the host gcc/libc is too new for an older CUDA (CUDA 12.4 and earlier with glibc 2.41+ produces the "cospi" error, and CUDA 12.x rejects gcc newer than 13); (2) the CUDA version is too new for the GPU (CUDA 13 dropped pre-sm_75, so it cannot build for Pascal sm_61 cards like the GTX 10-series).',
+    suggestion: 'Suggested action: for older NVIDIA GPUs use CUDA 12.8+ (still supports Pascal, compatible with glibc 2.41) and build with -DCMAKE_CUDA_ARCHITECTURES set to the card compute capability, or skip the source build and put a prebuilt llama-server on PATH.',
+    fixes: [
+      { label: 'Copy CUDA version guidance', action: () => _copyText('Match the CUDA toolkit to both the host and the GPU. For Pascal sm_61 GPUs (GTX 10-series), CUDA 13 will not build (it dropped pre-sm_75); use CUDA 12.8+ which still supports Pascal and is compatible with glibc 2.41, then build with -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61. The "cospi" exception-specification error comes from CUDA 12.4 and earlier against glibc 2.41+, and is fixed by CUDA 12.8+.') },
+      { label: 'Copy prebuilt-binary guidance', action: () => _copyText('Skip the source build: place a prebuilt CUDA llama-server on PATH (Cookbook prefers a native llama-server before building from source), expose its CUDA runtime via LD_LIBRARY_PATH, then relaunch and confirm the startup logs show CUDA KV/layer placement instead of dev = CPU.') },
+    ],
+  },
+  {
     pattern: /Engine core initialization failed/i,
     message: 'vLLM engine failed to start. Check the error above.',
     fixes: [
