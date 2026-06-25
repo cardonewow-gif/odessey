@@ -1714,6 +1714,7 @@ def setup_model_routes(model_discovery):
                     "ping_error": (ping or {}).get("error") if ping else None,
                     "model_type": getattr(r, "model_type", None) or "llm",
                     "supports_tools": getattr(r, "supports_tools", None),
+                    "reasoning_modes": json.loads(r.reasoning_modes) if getattr(r, "reasoning_modes", None) else {},
                     "endpoint_kind": kind,
                     "category": _classify_endpoint(base, kind),
                     "model_refresh_mode": _endpoint_refresh_mode(r, kind),
@@ -2241,6 +2242,12 @@ def setup_model_routes(model_discovery):
                 if "supports_tools" in body:
                     v = body["supports_tools"]
                     ep.supports_tools = {True: True, False: False, 'true': True, 'false': False, 1: True, 0: False}.get(v)
+                if "reasoning_modes" in body:
+                    # JSON map {model_id: "on"|"off"}; "auto"/other values dropped (= leave default).
+                    _rm = body["reasoning_modes"]
+                    if isinstance(_rm, dict):
+                        _clean = {str(k): val for k, val in _rm.items() if val in ("on", "off")}
+                        ep.reasoning_modes = json.dumps(_clean) if _clean else None
                 if "is_enabled" in body:
                     v_ie = body['is_enabled']
                     ep.is_enabled = v_ie.lower() in ('true', '1', 'yes') if isinstance(v_ie, str) else bool(v_ie)

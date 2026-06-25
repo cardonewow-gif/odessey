@@ -1842,6 +1842,15 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     else:
         messages_copy = non_sys
 
+    # Per-model reasoning control. Category #1: inject the "/think" soft-switch for
+    # models that gate reasoning that way, when the per-model preference is "on".
+    # Other ecosystem categories (#2 system-prompt, #3-#5 request-body fields, #6/#8
+    # graded effort) are catalogued in src/reasoning_control.py for future support.
+    from src.reasoning_control import reasoning_mode_for, reasoning_directive, inject_directive
+    _directive = reasoning_directive(model, reasoning_mode_for(model, url))
+    if _directive:
+        inject_directive(messages_copy, _directive)
+
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)
         h = _build_anthropic_headers(headers)
