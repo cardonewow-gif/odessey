@@ -522,6 +522,7 @@ async function loadEndpoints() {
             <div class="admin-user-info" style="flex:1;flex-wrap:wrap;gap:0.3rem;align-items:center;">
               <span class="adm-ep-row-logo" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex-shrink:0;opacity:0.9;">${providerLogoFromUrl(ep.base_url) || ''}</span>
               <span class="admin-user-name">${esc(ep.name)}</span>
+              <button type="button" class="admin-ep-rename-btn" data-adm-ep-rename="${ep.id}" data-adm-ep-name="${esc(ep.name)}" title="Rename endpoint" style="background:none;border:none;padding:0 3px;cursor:pointer;color:inherit;opacity:0.3;transition:opacity 0.15s;display:inline-flex;align-items:center;flex-shrink:0;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>
               ${ep.model_type === 'image' ? '<span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 20%, transparent);color:var(--accent);">Image</span>' : ''}
               ${kindLabel ? `<span class="admin-badge">${esc(kindLabel)}</span>` : ''}
               ${statusBadge}
@@ -570,6 +571,83 @@ async function loadEndpoints() {
       });
       return out;
     };
+    // Inline rename: click the edit button to turn the name into an input
+    queryAll('[data-adm-ep-rename]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const epId = btn.dataset.admEpRename;
+        const row = btn.closest('[data-adm-ep-id]');
+        if (!row) return;
+        const nameSpan = row.querySelector('.admin-user-name');
+        if (!nameSpan) return;
+        const currentName = btn.dataset.admEpName;
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = currentName;
+        input.className = 'admin-ep-rename-input';
+        input.style.cssText = 'padding:2px 6px;border:1px solid var(--accent);border-radius:4px;background:var(--bg);color:var(--fg);font-size:13px;font-weight:600;width:180px;outline:none;';
+        nameSpan.replaceWith(input);
+        input.focus();
+        input.select();
+
+        async function _saveRename() {
+          const newName = input.value.trim();
+          if (!newName || newName === currentName) {
+            const span = document.createElement('span');
+            span.className = 'admin-user-name';
+            span.textContent = currentName;
+            input.replaceWith(span);
+            return;
+          }
+          try {
+            const res = await fetch(`/api/model-endpoints/${epId}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify({ name: newName }),
+            });
+            if (res.ok) {
+              const span = document.createElement('span');
+              span.className = 'admin-user-name';
+              span.textContent = newName;
+              input.replaceWith(span);
+              btn.dataset.admEpName = newName;
+              _refreshAfterEndpointChange();
+              uiModule.showToast('Renamed to "' + newName + '"');
+            } else {
+              const data = await res.json().catch(() => ({}));
+              uiModule.showToast(data.detail || 'Failed to rename');
+              const span = document.createElement('span');
+              span.className = 'admin-user-name';
+              span.textContent = currentName;
+              input.replaceWith(span);
+            }
+          } catch (err) {
+            uiModule.showToast('Failed to rename: ' + err.message);
+            const span = document.createElement('span');
+            span.className = 'admin-user-name';
+            span.textContent = currentName;
+            input.replaceWith(span);
+          }
+        }
+
+        input.addEventListener('blur', _saveRename);
+        input.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            input.blur();
+          }
+          if (ev.key === 'Escape') {
+            ev.preventDefault();
+            const span = document.createElement('span');
+            span.className = 'admin-user-name';
+            span.textContent = currentName;
+            input.replaceWith(span);
+          }
+        });
+      });
+    });
+
     queryAll('[data-adm-toggle-ep]').forEach(btn => {
       btn.addEventListener('click', async (e) => { e.stopPropagation(); await fetch(`/api/model-endpoints/${btn.dataset.admToggleEp}`, { method: 'PATCH' }); loadEndpoints(); });
     });
