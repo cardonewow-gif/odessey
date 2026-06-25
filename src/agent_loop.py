@@ -465,8 +465,9 @@ Bulk delete/archive/mark emails. Use this for "delete all those" after listing e
 ```
 Calendar event management (CalDAV). Actions: `list_events`, `create_event`, `update_event`, `delete_event`, `list_calendars`. \
 For `list_events`: {start?, end?, calendar?}; prefer `start`/`end` for the range, though start_date/end_date and from/to aliases are accepted. \
-For `create_event`: {summary, dtstart, dtend?, duration?, calendar?, location?, description?, reminder_minutes?, rrule?}. \
-`dtstart` accepts natural language ("tomorrow at 1pm", "in 2 hours", "next monday 9am") or ISO ("2026-05-12T13:00:00"). \
+For `create_event`: {summary, dtstart, date_text?, dtend?, duration?, calendar?, location?, description?, reminder_minutes?, rrule?}. \
+`dtstart` accepts natural language ("June 10 at 3pm", "tomorrow at 1pm", "in 2 hours", "next monday 9am") or ISO ("2026-06-10T15:00:00"). \
+When the user gives a named date like "June 10", copy that phrase exactly into `date_text` (e.g. {"dtstart":"June 10 3pm","date_text":"June 10"}) OR, if converting to ISO yourself, preserve the month/day exactly ("June 10" -> "YYYY-06-10", never January). \
 If `dtend` omitted, defaults to dtstart+1h (or +1d when `all_day: true`). \
 For a RECURRING event pass `rrule` as an iCalendar RRULE string, e.g. `"FREQ=WEEKLY;BYDAY=MO"` (every Monday), `"FREQ=DAILY;COUNT=10"`, or `"FREQ=MONTHLY;BYMONTHDAY=1"` — create ONE event with the rrule, do not loop creating many events. \
 If the user asks for a reminder/alarm before the event, pass `reminder_minutes` as an integer; do not write reminder text into the event description and do NOT also call `manage_notes` for the same reminder because calendar reminders are routed through Notes automatically. \
