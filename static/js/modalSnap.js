@@ -23,6 +23,7 @@ const MIN_CHAT_WIDTH = 380;
 const EMAIL_DOC_SPLIT_WIDTH_KEY = 'odysseus-email-doc-split-width';
 const EDGE_DOCK_WIDTH_KEY_PREFIX = 'odysseus-edge-dock-width';
 const MIN_EDGE_DOCK_WIDTH = 320;
+const EDGE_DOCK_SWITCHER_FLAG = 'odysseus-edge-dock-switcher';
 
 let _edgeDockHandlePositioner = null;
 
@@ -30,8 +31,109 @@ function _positionEdgeDockResizeHandles() {
   try { _edgeDockHandlePositioner && _edgeDockHandlePositioner(); } catch (_) {}
 }
 
+function _notifyEdgeDockChanged(side, owner = null) {
+  try {
+    window.dispatchEvent(new CustomEvent('odysseus:edge-dock-changed', {
+      detail: { side, owner },
+    }));
+  } catch (_) {}
+}
+
 function _dockClassForSide(side) {
   return side === 'left' ? 'modal-left-docked' : 'modal-right-docked';
+}
+
+function _dockOwnerSurface(owner) {
+  return owner?.closest?.('.notes-pane-backdrop') || owner;
+}
+
+function _zIndexForElement(el, fallback = 250) {
+  const raw = el ? window.getComputedStyle(el).zIndex : '';
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function _isUsableDockOwner(owner) {
+  if (!owner || !owner.isConnected) return false;
+  if (owner.classList?.contains('hidden')) return false;
+  if (owner.classList?.contains('modal-minimized')) return false;
+  if (owner.style?.display === 'none') return false;
+  const content = _resolveDockNodes(owner)?.content;
+  if (!content || !content.isConnected) return false;
+  if (content.classList?.contains('hidden')) return false;
+  if (content.style?.display === 'none') return false;
+  const r = content.getBoundingClientRect?.();
+  return !!r && r.width > 0 && r.height > 0;
+}
+
+function _dockOwnersForSide(side) {
+  if (side !== 'left' && side !== 'right') return [];
+  return Array.from(document.querySelectorAll(`.${_dockClassForSide(side)}`)).filter(_isUsableDockOwner);
+}
+
+function _activeDockOwnerForSide(side) {
+  let best = null;
+  let bestZ = -Infinity;
+  _dockOwnersForSide(side).forEach((owner) => {
+    const z = _zIndexForElement(_dockOwnerSurface(owner), 250);
+    if (z >= bestZ) {
+      best = owner;
+      bestZ = z;
+    }
+  });
+  return best;
+}
+
+function _applyDockWidthToOwner(owner, side, width, left = _leftNavRight()) {
+  const content = _resolveDockNodes(owner)?.content;
+  if (!content || !width) return;
+  const w = Math.round(width);
+  content._userDockWidth = w;
+  if (side === 'right') {
+    content.style.left = 'auto';
+    content.style.right = '0';
+    content.style.width = w + 'px';
+    content.style.maxWidth = w + 'px';
+    if (_shouldAutoCollapseSidebar(w)) {
+      _collapseSidebarToRail();
+      if (content._preDockSnapshot) content._preDockSnapshot.collapsedSidebar = true;
+    }
+  } else {
+    content._emailDocSplitUserW = w;
+    content.style.left = left + 'px';
+    content.style.right = 'auto';
+    content.style.width = w + 'px';
+    content.style.maxWidth = w + 'px';
+  }
+}
+
+function _syncDockSideWidth(side, requestedWidth, owners = _dockOwnersForSide(side)) {
+  if (side !== 'left' && side !== 'right') return 0;
+  if (!owners.length) return 0;
+  if (side === 'left'
+      && document.body.classList.contains('email-doc-split-active')
+      && document.body.classList.contains('doc-view')) {
+    _positionEdgeDockResizeHandles();
+    return requestedWidth || _activeDockWidth(side);
+  }
+  let w = 0;
+  if (side === 'right') {
+    w = _clampRightDockWidth(requestedWidth || _activeDockWidth('right') || _defaultDockWidth());
+    document.body.classList.add('right-dock-active');
+    document.documentElement.style.setProperty('--right-dock-w', w + 'px');
+    owners.forEach((owner) => _applyDockWidthToOwner(owner, side, w));
+  } else {
+    const left = _leftNavRight();
+    w = _clampLeftDockWidth(requestedWidth || _activeDockWidth('left') || _defaultDockWidth(), left);
+    document.body.classList.add('left-dock-active');
+    document.documentElement.style.setProperty(
+      '--left-dock-w',
+      document.body.classList.contains('email-doc-split-active') ? '0px' : w + 'px',
+    );
+    owners.forEach((owner) => _applyDockWidthToOwner(owner, side, w, left));
+  }
+  _positionEdgeDockResizeHandles();
+  return w;
 }
 
 function _hasOtherDockedWindow(side, owner) {
@@ -347,6 +449,7 @@ function _applyDockInternal(modal, side, dockClass) {
   if (!nodes) return 0;
   const content = nodes.content;
   if (!content) return 0;
+  const existingSideWidth = _hasOtherDockedWindow(side, modal) ? _activeDockWidth(side) : 0;
   // If the modal is currently docked on the OTHER side (e.g. the user
   // manually docked it right, then a reply re-docks it left), clear that
   // side's class + body push first. Otherwise both sides' state coexist —
@@ -509,7 +612,13 @@ function _applyDockInternal(modal, side, dockClass) {
   }
   content._dockSide = side;
   content._dockOwner = modal;
-  _positionEdgeDockResizeHandles();
+  const sideOwners = _dockOwnersForSide(side);
+  if (sideOwners.length > 1) {
+    const syncedWidth = _syncDockSideWidth(side, existingSideWidth || w, sideOwners);
+    if (syncedWidth) w = syncedWidth;
+  } else {
+    _positionEdgeDockResizeHandles();
+  }
   // Watch for the docked modal disappearing (removed from DOM or hidden
   // via .hidden class) and clean up the body padding + sidebar in that
   // case. Without this, closing a docked window leaves a phantom strip
@@ -539,6 +648,7 @@ function _applyDockInternal(modal, side, dockClass) {
       modal._dockCloseWatcher = { obs };
     }
   }
+  _notifyEdgeDockChanged(side, modal);
   return w;
 }
 
@@ -571,6 +681,8 @@ function _onDockedModalGone(modal, dockClass) {
   }
   modal.classList.remove('modal-right-docked');
   modal.classList.remove('modal-left-docked');
+  if (hadRight) _notifyEdgeDockChanged('right', modal);
+  if (hadLeft) _notifyEdgeDockChanged('left', modal);
   // Clear the content's docked inline geometry. Singleton modals (plan,
   // workspace, calendar, …) reuse the same element across open/close, so if we
   // only drop the body push the element stays positioned (position:fixed;
@@ -666,6 +778,7 @@ export function clearRightDock(modal, cx, cy, dockClass) {
   delete content._preDockSnapshot;
   delete content._dockSuspended;
   _positionEdgeDockResizeHandles();
+  _notifyEdgeDockChanged(side, modal);
 }
 
 // Temporarily release a docked modal's body push (chat returns to full
@@ -711,6 +824,7 @@ export function suspendDock(modal) {
   }
   content._dockSuspended = side;
   _positionEdgeDockResizeHandles();
+  _notifyEdgeDockChanged(side, modal);
   return side;
 }
 
@@ -785,6 +899,200 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
   };
 }
 
+(function _initEdgeDockSwitcher() {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return;
+
+  const bars = { left: null, right: null };
+  let refreshTimer = 0;
+  let refreshInterval = 0;
+
+  const _enabled = () => {
+    try { return localStorage.getItem(EDGE_DOCK_SWITCHER_FLAG) !== '0'; }
+    catch (_) { return true; }
+  };
+
+  const _ownerSurface = _dockOwnerSurface;
+
+  const _topToolZ = (exclude = null) => {
+    const skip = new Set([exclude, _ownerSurface(exclude)].filter(Boolean));
+    let top = 300;
+    document.querySelectorAll('.modal, .research-overlay, .notes-pane-backdrop').forEach((el) => {
+      if (!el || skip.has(el)) return;
+      if (el.classList?.contains('hidden')) return;
+      if (el.style?.display === 'none') return;
+      top = Math.max(top, _zIndexForElement(el, 250));
+    });
+    return top;
+  };
+
+  const _bringOwnerToFront = (owner) => {
+    const surface = _ownerSurface(owner);
+    if (!surface) return;
+    surface.style.setProperty('z-index', String(_topToolZ(owner) + 1), 'important');
+    try {
+      window.dispatchEvent(new CustomEvent('odysseus:modal-opened', {
+        detail: { id: owner?.id || '', modal: owner },
+      }));
+    } catch (_) {}
+  };
+
+  const _simpleTitleForOwner = (owner) => {
+    const id = owner?.id || '';
+    const labels = {
+      'assistant-settings-modal': 'Assistant',
+      'calendar-modal': 'Calendar',
+      'compare-model-overlay': 'Compare',
+      'cookbook-modal': 'Cookbook',
+      'doc-editor-pane': 'Document',
+      'doclib-modal': 'Library',
+      'email-lib-modal': 'Email',
+      'gallery-modal': 'Gallery',
+      'library-modal': 'Library',
+      'notes-pane': 'Notes',
+      'research-overlay': 'Deep Research',
+      'research-pane': 'Deep Research',
+      'settings-modal': 'Settings',
+      'tasks-modal': 'Tasks',
+    };
+    return labels[id] || '';
+  };
+
+  const _cleanTabLabel = (label) => (label || '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+\d+\s+(photos?|research|tasks?|notes?|documents?|docs?|items?|emails?|chats?|sessions?|models?)$/i, '')
+    .trim();
+
+  const _labelForOwner = (owner) => {
+    const simple = _simpleTitleForOwner(owner);
+    if (simple) return simple;
+    const content = _resolveDockNodes(owner)?.content || owner;
+    const titleEl = content?.querySelector?.('.modal-header h4, .notes-pane-title, .modal-title, [data-window-title]');
+    const text = _cleanTabLabel(titleEl?.textContent || owner?.getAttribute?.('aria-label') || owner?.id || 'Window');
+    return text || 'Window';
+  };
+
+  const _activeOwner = (owners) => {
+    let best = null;
+    let bestZ = -Infinity;
+    owners.forEach((owner) => {
+      const z = _zIndexForElement(_ownerSurface(owner), 250);
+      if (z >= bestZ) {
+        best = owner;
+        bestZ = z;
+      }
+    });
+    return best || owners[owners.length - 1] || null;
+  };
+
+  const _hideBar = (side) => {
+    const bar = bars[side];
+    if (!bar) return;
+    bar.replaceChildren();
+    bar.hidden = true;
+    bar.parentElement?.classList?.remove('edge-dock-switcher-host');
+  };
+
+  const _ensureBar = (side) => {
+    if (!bars[side]?.isConnected) {
+      const bar = document.createElement('div');
+      bar.className = `edge-dock-switcher edge-dock-switcher-${side}`;
+      bar.hidden = true;
+      bar.setAttribute('role', 'tablist');
+      bar.setAttribute('aria-label', `${side} docked windows`);
+      bar.addEventListener('pointerdown', (event) => event.stopPropagation());
+      bar.addEventListener('mousedown', (event) => event.stopPropagation());
+      bar.addEventListener('touchstart', (event) => event.stopPropagation(), { passive: true });
+      bars[side] = bar;
+    }
+    const oldParent = bars[side]?.parentElement;
+    if (oldParent && oldParent !== document.body) oldParent.classList.remove('edge-dock-switcher-host');
+    if (bars[side].parentElement !== document.body) document.body.appendChild(bars[side]);
+    return bars[side];
+  };
+
+  const _renderSide = (side) => {
+    const owners = _enabled() && window.innerWidth > 768 ? _dockOwnersForSide(side) : [];
+    if (owners.length < 2) {
+      _hideBar(side);
+      return;
+    }
+    const active = _activeOwner(owners);
+    const bar = _ensureBar(side);
+    bar.replaceChildren();
+    owners.forEach((owner) => {
+      const label = _labelForOwner(owner);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `edge-dock-switcher-tab${owner === active ? ' active' : ''}`;
+      btn.title = label;
+      btn.setAttribute('role', 'tab');
+      btn.setAttribute('aria-selected', owner === active ? 'true' : 'false');
+      btn.addEventListener('pointerdown', (event) => event.stopPropagation());
+      btn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        _bringOwnerToFront(owner);
+        _scheduleRefresh(40);
+      });
+      const labelEl = document.createElement('span');
+      labelEl.className = 'edge-dock-switcher-tab-label';
+      labelEl.textContent = label;
+      btn.appendChild(labelEl);
+      bar.appendChild(btn);
+    });
+    bar.hidden = false;
+  };
+
+  function _refresh() {
+    if (!document.body) return;
+    _renderSide('left');
+    _renderSide('right');
+  }
+
+  function _scheduleRefresh(delay = 180) {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => {
+      refreshTimer = 0;
+      requestAnimationFrame(_refresh);
+    }, delay);
+  }
+
+  const _start = () => {
+    _scheduleRefresh(0);
+    window.addEventListener('resize', () => _scheduleRefresh(120));
+    window.addEventListener('odysseus:modal-opened', () => _scheduleRefresh(120));
+    window.addEventListener('odysseus:edge-dock-changed', () => _scheduleRefresh(320));
+    document.addEventListener('keyup', (event) => {
+      if (event.key === 'Escape') _scheduleRefresh(120);
+    }, true);
+    refreshInterval = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') _refresh();
+    }, 1500);
+    window.odysseusEdgeDockSwitcher = {
+      refresh: _refresh,
+      disable() {
+        try { localStorage.setItem(EDGE_DOCK_SWITCHER_FLAG, '0'); } catch (_) {}
+        _refresh();
+      },
+      enable() {
+        try { localStorage.removeItem(EDGE_DOCK_SWITCHER_FLAG); } catch (_) {}
+        _refresh();
+      },
+      stop() {
+        if (refreshInterval) window.clearInterval(refreshInterval);
+        refreshInterval = 0;
+        bars.left?.remove();
+        bars.right?.remove();
+        bars.left = null;
+        bars.right = null;
+      },
+    };
+  };
+
+  if (document.body) _start();
+  else document.addEventListener('DOMContentLoaded', _start, { once: true });
+})();
+
 (function _initEdgeDockResizeHandles() {
   if (typeof document === 'undefined') return;
   if (!document.body) {
@@ -820,33 +1128,7 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
     document.body.appendChild(handle);
   }
 
-  const _isUsableDockOwner = (owner) => {
-    if (!owner || !owner.isConnected) return false;
-    if (owner.classList?.contains('hidden')) return false;
-    if (owner.style?.display === 'none') return false;
-    const nodes = _resolveDockNodes(owner);
-    const content = nodes?.content;
-    if (!content || !content.isConnected) return false;
-    if (content.classList?.contains('hidden')) return false;
-    if (content.style?.display === 'none') return false;
-    const r = content.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  };
-
-  const _activeDockOwner = (side) => {
-    const cls = _dockClassForSide(side);
-    const all = Array.from(document.querySelectorAll(`.${cls}`));
-    for (const owner of all.reverse()) {
-      if (_isUsableDockOwner(owner)) return owner;
-    }
-    return null;
-  };
-
-  const _zIndexFor = (el, fallback = 250) => {
-    const raw = el ? window.getComputedStyle(el).zIndex : '';
-    const n = parseInt(raw, 10);
-    return Number.isFinite(n) ? n : fallback;
-  };
+  const _activeDockOwner = (side) => _activeDockOwnerForSide(side);
 
   const _hasVisibleFloatingModal = (owner) => {
     const all = Array.from(document.querySelectorAll('.modal:not(.hidden):not(.modal-minimized)'));
@@ -863,40 +1145,18 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
     });
   };
 
-  const _setWidth = (owner, side, clientX) => {
-    const nodes = _resolveDockNodes(owner);
-    const content = nodes?.content;
-    if (!content) return 0;
+  const _setWidth = (owner, side, clientX, resizeOwners = null) => {
+    const targets = (resizeOwners && resizeOwners.length) ? resizeOwners : [owner].filter(Boolean);
+    if (!targets.length) return 0;
     let w = 0;
     if (side === 'right') {
       w = _clampRightDockWidth(window.innerWidth - clientX);
-      content._userDockWidth = w;
-      content.style.left = 'auto';
-      content.style.right = '0';
-      content.style.width = w + 'px';
-      content.style.maxWidth = w + 'px';
-      document.body.classList.add('right-dock-active');
-      document.documentElement.style.setProperty('--right-dock-w', w + 'px');
-      if (_shouldAutoCollapseSidebar(w)) {
-        _collapseSidebarToRail();
-        if (content._preDockSnapshot) content._preDockSnapshot.collapsedSidebar = true;
-      }
+      _syncDockSideWidth(side, w, targets);
     } else {
       const left = _leftNavRight();
       w = _clampLeftDockWidth(clientX - left, left);
-      content._userDockWidth = w;
-      content._emailDocSplitUserW = w;
-      content.style.left = left + 'px';
-      content.style.right = 'auto';
-      content.style.width = w + 'px';
-      content.style.maxWidth = w + 'px';
-      document.body.classList.add('left-dock-active');
-      document.documentElement.style.setProperty(
-        '--left-dock-w',
-        document.body.classList.contains('email-doc-split-active') ? '0px' : w + 'px',
-      );
+      _syncDockSideWidth(side, w, targets);
     }
-    _positionEdgeDockResizeHandles();
     return w;
   };
 
@@ -928,7 +1188,7 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
       }
       _setStyle(handle, 'display', 'block');
       _setStyle(handle, 'left', (x - 5) + 'px');
-      _setStyle(handle, 'zIndex', String(_zIndexFor(owner) + 1));
+      _setStyle(handle, 'zIndex', String(_zIndexForElement(_dockOwnerSurface(owner), 250) + 1));
     }
   };
 
@@ -943,15 +1203,17 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
       handle.setPointerCapture?.(e.pointerId);
       const nodes = _resolveDockNodes(owner);
       const content = nodes?.content;
+      const resizeOwners = _dockOwnersForSide(side);
+      if (!resizeOwners.includes(owner)) resizeOwners.push(owner);
       const prevCursor = document.body.style.cursor;
       const prevUserSelect = document.body.style.userSelect;
       document.body.style.cursor = 'col-resize';
       document.body.style.userSelect = 'none';
       document.body.classList.add('edge-dock-resizing');
-      _setWidth(owner, side, e.clientX);
+      _setWidth(owner, side, e.clientX, resizeOwners);
       const onMove = (ev) => {
         ev.preventDefault();
-        _setWidth(owner, side, ev.clientX);
+        _setWidth(owner, side, ev.clientX, resizeOwners);
       };
       const onUp = (ev) => {
         try { handle.releasePointerCapture?.(e.pointerId); } catch (_) {}
@@ -964,7 +1226,12 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
         const finalW = side === 'right'
           ? parseFloat(document.documentElement.style.getPropertyValue('--right-dock-w')) || content?.getBoundingClientRect?.().width || 0
           : content?.getBoundingClientRect?.().width || 0;
-        if (finalW) _saveDockWidth(owner, content, side, finalW);
+        if (finalW) {
+          resizeOwners.forEach((dockOwner) => {
+            const dockContent = _resolveDockNodes(dockOwner)?.content;
+            if (dockContent) _saveDockWidth(dockOwner, dockContent, side, finalW);
+          });
+        }
         ev.preventDefault();
       };
       document.addEventListener('pointermove', onMove, true);
