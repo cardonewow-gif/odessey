@@ -72,11 +72,23 @@ The script also reads `.env` at startup, so `APP_BIND=0.0.0.0` and `APP_PORT`
 set there are picked up automatically without a command-line override each run.
 
 Keep `AUTH_ENABLED=true` (the default) before binding outside loopback. Do not
-expose this port directly to the public internet. To build a clickable app wrapper:
+expose this port directly to the public internet. To build the standalone native app:
 
 ```bash
 ./build-macos-app.sh
 ```
+
+That script builds a native `.app` for the current Mac architecture
+(`arm64` on Apple Silicon, `x86_64` on Intel), bundles the Python runtime and
+app code inside the app, copies that runtime into
+`~/Library/Application Support/Odysseus/runtime` on first launch, and ad-hoc
+signs the bundle when `codesign` is available. The default minimum supported
+macOS version is `11.0`; override it with `MACOS_MIN_VERSION=...` if you need a
+different deployment target.
+
+The generated app is meant for local/manual distribution. It is not notarized
+by this script, so broader distribution still needs a real Developer ID
+signature plus notarization.
 
 <details>
 <summary>Cookbook, GPU, Ollama, and troubleshooting notes</summary>
