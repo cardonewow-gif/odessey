@@ -24,24 +24,28 @@ function safeRasterDataUrl(raw) {
 /* ── Tab switching ── */
 const ADMIN_TABS = new Set(['services', 'integrations', 'tools', 'users', 'system']);
 
+function _switchTab(tab) {
+  // Lazy-init admin when first clicking an admin tab
+  if (ADMIN_TABS.has(tab) && window.adminModule && typeof window.adminModule.open === 'function') {
+    window.adminModule.open(tab);
+    return;
+  }
+  modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
+  modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
+  // Mark when the Appearance tab is open so the modal can go
+  // semi-transparent — lets the user see the rest of the UI react as
+  // they flip toggles instead of having to close + reopen the modal.
+  document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
+  syncAppearanceOpacity(tab === 'appearance');
+  if (tab === 'ai') refreshAiModelEndpoints();
+}
+
 function initTabs() {
-  modalEl.querySelectorAll('[data-settings-tab]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const tab = btn.dataset.settingsTab;
-      // Lazy-init admin when first clicking an admin tab
-      if (ADMIN_TABS.has(tab) && window.adminModule && typeof window.adminModule.open === 'function') {
-        window.adminModule.open(tab);
-        return;
-      }
-      modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
-      modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
-      // Mark when the Appearance tab is open so the modal can go
-      // semi-transparent — lets the user see the rest of the UI react as
-      // they flip toggles instead of having to close + reopen the modal.
-      document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
-      syncAppearanceOpacity(tab === 'appearance');
-      if (tab === 'ai') refreshAiModelEndpoints();
-    });
+  // Event delegation so dynamically-added plugin tabs work without rebinding
+  modalEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-settings-tab]');
+    if (!btn) return;
+    _switchTab(btn.dataset.settingsTab);
   });
 }
 
@@ -5707,6 +5711,62 @@ function syncAdminVisibility() {
   });
 }
 
+/* ── Plugin toggles ── */
+async function renderPluginToggles() {
+  const container = document.getElementById('plugin-toggle-list');
+  if (!container) return;
+  try {
+    const r = await fetch('/api/plugins');
+    const data = await r.json();
+    const plugins = data.installed || [];
+    if (plugins.length === 0) {
+      container.innerHTML = '<div style="opacity:0.5;font-size:13px;">No plugins installed.</div>';
+      return;
+    }
+    container.innerHTML = '';
+    for (const p of plugins) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border-radius:6px;border:1px solid var(--border);';
+      const nameSpan = document.createElement('span');
+      nameSpan.style.fontSize = '13px';
+      nameSpan.textContent = `${p.name} v${p.version}`;
+      if (Array.isArray(p.capabilities) && p.capabilities.includes('manage_plugins')) {
+        const warn = document.createElement('span');
+        warn.textContent = ' (privileged)';
+        warn.style.color = '#e55';
+        warn.style.fontSize = '11px';
+        nameSpan.appendChild(warn);
+      }
+      const toggleWrap = document.createElement('label');
+      toggleWrap.className = 'admin-switch';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = p._enabled === true;
+      input.dataset.pluginName = p.name;
+      input.addEventListener('change', async (e) => {
+        try {
+          await fetch(`/api/plugins/${encodeURIComponent(p.name)}/toggle`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: e.target.checked }),
+          });
+        } catch (err) {
+          console.warn('Toggle failed:', err);
+        }
+      });
+      const slider = document.createElement('span');
+      slider.className = 'admin-slider';
+      toggleWrap.appendChild(input);
+      toggleWrap.appendChild(slider);
+      row.appendChild(nameSpan);
+      row.appendChild(toggleWrap);
+      container.appendChild(row);
+    }
+  } catch (e) {
+    container.innerHTML = '<div style="opacity:0.5;font-size:13px;">Failed to load plugins.</div>';
+  }
+}
+
 /* ═══════════════════════════════════════════
    PUBLIC API
    ═══════════════════════════════════════════ */
@@ -5728,6 +5788,7 @@ export function open(tab) {
   document.body.classList.toggle('settings-appearance-open', activeTab === 'appearance');
   syncAppearanceOpacity(activeTab === 'appearance');
   if (activeTab === 'ai') refreshAiModelEndpoints();
+  if (activeTab === 'plugins') renderPluginToggles();
   if (ADMIN_TABS.has(activeTab) && window.adminModule && !window.adminModule._initialized) {
     window.adminModule._initData();
   }
