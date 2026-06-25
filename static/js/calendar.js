@@ -1166,17 +1166,43 @@ function _wkEventTopHeight(ev, dayStr) {
   // Date math if the string isn't shaped as expected.
   const _toMin = (iso, fallbackDate) => {
     if (!iso) return null;
+
+    // FIX: Parse UTC/TZ-aware strings (e.g. "2026-05-11T05:30:00Z" or "+05:30")
+    // via Date so the browser converts to local time before extracting hours/minutes.
+    if (/[Zz]$|[\+\-]\d{2}:?\d{2}$/.test(iso)) {
+      const d = new Date(iso);
+      if (!isNaN(d)) {
+        const pad = n => String(n).padStart(2, '0');
+        const localDate = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+        if (localDate < fallbackDate) return 0;
+        if (localDate > fallbackDate) return 24 * 60;
+        return d.getHours() * 60 + d.getMinutes();
+      }
+    }
+
+    // Fallback for naive local strings using the dev branch's new helper
     const mins = _timeToMin(iso);
     if (mins !== null && iso.includes('T')) {
       // If the event spans into a previous/next day, clamp to today's bounds.
       const evDate = _localDateOf(iso);
-      if (evDate < fallbackDate) return 0;             // event started before today
-      if (evDate > fallbackDate) return 24 * 60;       // event ends after today
+      if (evDate < fallbackDate) return 0;          // event started before today
+      if (evDate > fallbackDate) return 24 * 60;    // event ends after today
       return mins;
     }
+   
     // All-day or date-only — treat as start of day.
     return 0;
   };
+  const startMin = _toMin(ev.dtstart, dayStr);
+  const endMin   = _toMin(ev.dtend, dayStr) ?? (startMin + 60);
+  const gridStart = WEEK_HOUR_START * 60;
+  const gridEnd   = WEEK_HOUR_END * 60;
+  const sMin = Math.max(gridStart, startMin);
+  const eMin = Math.min(gridEnd, Math.max(endMin, sMin + 15));
+  const top = (sMin - gridStart) * (WEEK_HOUR_PX / 60);
+  const height = Math.max(18, (eMin - sMin) * (WEEK_HOUR_PX / 60));
+  return { top, height };
+}
   const startMin = _toMin(ev.dtstart, dayStr);
   const endMin   = _toMin(ev.dtend, dayStr) ?? (startMin + 60);
   const gridStart = WEEK_HOUR_START * 60;
