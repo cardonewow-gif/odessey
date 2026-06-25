@@ -1439,7 +1439,12 @@ class TaskScheduler:
         system_prompt = (
             (crew.personality or "").strip()
             if crew and crew.personality
-            else "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
+            else ("You are a helpful assistant executing a scheduled task.\n\n"
+            "IMPORTANT: you MUST call tools directly using the provided tool "
+            "interface. Do NOT describe or role-play tool calls in prose — "
+            "for example, do not write \"I will create a task\" without "
+            "actually calling the task tool. Always invoke the real tool "
+            "function for each action.")
         )
         char_id = (getattr(task, "character_id", None) or "").strip()
         if char_id:
@@ -1719,7 +1724,10 @@ class TaskScheduler:
         """Run the full agent loop with tool access, collecting the final text."""
         from src.agent_loop import stream_agent_loop
 
-        system_content = system_prompt or "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
+        system_content = system_prompt or ("You are a helpful assistant executing a scheduled task.\n\n"
+            "IMPORTANT: you MUST call tools directly using the provided tool "
+            "interface. Do NOT describe or role-play tool calls in prose. "
+            "Always invoke the real tool function for each action.")
         user_content = override_user_message or task.prompt
         messages = [
             {"role": "system", "content": system_content},
