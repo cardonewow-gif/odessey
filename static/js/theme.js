@@ -1506,6 +1506,7 @@ export function closePopup() {
   if (content && !content.classList.contains('modal-closing')) {
     content.classList.add('modal-closing');
     content.addEventListener('animationend', () => {
+      if (!content.classList.contains('modal-closing')) return;
       modal.classList.add('hidden');
       content.classList.remove('modal-closing');
     }, { once: true });
