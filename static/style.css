@@ -3438,6 +3438,135 @@ body.bg-pattern-sparkles {
       letter-spacing: 1px;
       font-size: 0.9em;
     }
+    /* Expanded context breakdown popup */
+    .ctx-detail-popup--expanded {
+      min-width: 280px;
+      max-width: 360px;
+      /*
+       * Category colors: high-chroma hues with a light fg anchor only for
+       * contrast. Mixing heavily with --fg collapsed every bucket toward grey
+       * on custom themes; conversation also matched the empty bar track.
+       * Hues are spaced ~30–40° apart on the wheel for legibility in both
+       * the segmented bar and the swatch key.
+       */
+      --ctx-cat-system_prompt: color-mix(in srgb, hsl(212 78% 52%) 78%, var(--fg));
+      --ctx-cat-tool_definitions: color-mix(in srgb, hsl(36 82% 50%) 78%, var(--fg));
+      --ctx-cat-rules: color-mix(in srgb, hsl(278 72% 58%) 78%, var(--fg));
+      --ctx-cat-skills: color-mix(in srgb, hsl(142 70% 46%) 78%, var(--fg));
+      --ctx-cat-mcp: color-mix(in srgb, hsl(328 76% 54%) 78%, var(--fg));
+      --ctx-cat-memory: color-mix(in srgb, hsl(172 68% 44%) 78%, var(--fg));
+      --ctx-cat-documents: color-mix(in srgb, hsl(88 62% 46%) 78%, var(--fg));
+      --ctx-cat-web: color-mix(in srgb, hsl(192 74% 46%) 78%, var(--fg));
+      --ctx-cat-summarized_conversation: color-mix(in srgb, hsl(24 78% 52%) 78%, var(--fg));
+      --ctx-cat-conversation: color-mix(in srgb, hsl(252 62% 58%) 78%, var(--fg));
+      /* Unused window in the bar — low-chroma wash only (never --border: accent on many themes) */
+      --ctx-bar-empty: color-mix(in srgb, var(--fg) 4%, var(--panel, var(--bg)));
+      --ctx-bar-empty-border: color-mix(in srgb, var(--fg) 7%, transparent);
+    }
+    .ctx-popup-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: var(--fg);
+    }
+    .ctx-expand-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2px;
+      background: transparent;
+      border: none;
+      color: var(--color-muted, #888);
+      cursor: pointer;
+      border-radius: 4px;
+      transition: color 0.15s, background 0.15s;
+    }
+    .ctx-expand-btn:hover {
+      color: var(--fg);
+      background: var(--border);
+    }
+    .ctx-expand-icon {
+      display: block;
+    }
+    .ctx-usage-subheader {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 6px 10px;
+      font-size: 0.75rem;
+      color: var(--color-muted, #888);
+      margin-bottom: 8px;
+    }
+    .ctx-usage-pct {
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .ctx-usage-sep {
+      opacity: 0.5;
+      user-select: none;
+      line-height: 1;
+    }
+    .ctx-usage-tokens {
+      margin-left: auto;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      text-align: right;
+    }
+    .ctx-segmented-bar {
+      display: flex;
+      width: 100%;
+      height: 8px;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-bottom: 10px;
+      box-sizing: border-box;
+    }
+    .ctx-detail-popup--expanded .ctx-segmented-bar {
+      background: var(--ctx-bar-empty);
+      border: 1px solid var(--ctx-bar-empty-border);
+    }
+    .ctx-segment {
+      height: 100%;
+      background: var(--cat-color, var(--color-muted));
+      min-width: 2px;
+      box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--fg) 12%, transparent);
+    }
+    .ctx-cat-list {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      margin-bottom: 8px;
+    }
+    .ctx-cat-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.8rem;
+    }
+    .ctx-cat-swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      flex-shrink: 0;
+      background: var(--cat-color, var(--color-muted));
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 22%, transparent);
+    }
+    .ctx-cat-label {
+      flex: 1;
+      color: var(--fg);
+    }
+    .ctx-cat-tokens {
+      color: var(--color-muted, #888);
+      font-variant-numeric: tabular-nums;
+    }
+    .ctx-estimated-note {
+      font-size: 0.7rem;
+      opacity: 0.6;
+      margin-bottom: 8px;
+      font-style: italic;
+    }
     /* Memory-used indicator pill */
     .memory-used-pill {
       display: inline-flex;
