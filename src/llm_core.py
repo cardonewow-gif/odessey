@@ -5,6 +5,7 @@ import time
 import json
 import logging
 import hashlib
+import ipaddress
 import threading
 import re
 import os
@@ -297,7 +298,14 @@ def _is_ollama_native_url(url: str) -> bool:
     if path.startswith("/v1"):
         return False
     local_ollama_host = host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"} or parsed.port == 11434
-    return local_ollama_host and (path == "" or path == "/api" or path.startswith("/api/"))
+    if path == "":
+        # A bare host:port is only clearly native Ollama on port 11434.
+        # On any other local port, a path-less URL could be LM Studio,
+        # vLLM, llama.cpp, or a proxy, so don't claim it here. Let the
+        # LM Studio fingerprint probe and the OpenAI-compatible default
+        # sort it out.
+        return parsed.port == 11434
+    return local_ollama_host and (path == "/api" or path.startswith("/api/"))
 
 
 def _is_ollama_openai_compat_url(url: str) -> bool:
@@ -485,6 +493,68 @@ def _parse_ollama_response(data: dict) -> str:
     return message.get("content") or data.get("response") or ""
 
 
+def _is_lmstudio_models_payload(data: dict) -> bool:
+    """True if a native /api/v1/models response has LM Studio's shape."""
+    models = (data or {}).get("models")
+    return (
+        isinstance(models, list)
+        and bool(models)
+        and isinstance(models[0], dict)
+        and "key" in models[0]
+        and "architecture" in models[0]
+    )
+
+def _is_local_host(host: Optional[str]) -> bool:
+    """True for loopback/LAN/Tailscale hosts (never public domains)."""
+    host = (host or "").lower()
+    if not host:
+        return False
+    if host in {"localhost", "host.docker.internal"} or host.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return "." not in host
+    if ip.is_loopback or ip.is_private or ip.is_link_local:
+        return True
+    return ip in ipaddress.ip_network("100.64.0.0/10")
+
+
+_PROVIDER_FINGERPRINT_TTL = 60.0
+# (host, port) -> (models_list | None, expiry); list = LM Studio, None = not LM Studio.
+_lmstudio_models_cache: Dict[tuple, tuple] = {}
+
+
+def _probe_lmstudio_models(url: str) -> Optional[list]:
+    """Return LM Studio's native /api/v1/models list, or None when the endpoint
+    isn't LM Studio or is unreachable (short-TTL cached; transient errors uncached)."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    key = (host, parsed.port)
+    now = time.time()
+    cached = _lmstudio_models_cache.get(key)
+    if cached is not None and cached[1] > now:
+        return cached[0]
+    authority = host if parsed.port is None else f"{host}:{parsed.port}"
+    probe_url = f"{parsed.scheme or 'http'}://{authority}/api/v1/models"
+    try:
+        r = httpx.get(probe_url, timeout=1.0)
+    except Exception:
+        return None
+    try:
+        data = r.json() if r.is_success else {}
+    except Exception:
+        data = {}
+    models = data.get("models") if _is_lmstudio_models_payload(data) else None
+    _lmstudio_models_cache[key] = (models, now + _PROVIDER_FINGERPRINT_TTL)
+    return models
+
+
+def _fingerprint_is_lmstudio(url: str) -> bool:
+    """Confirm LM Studio by probing its native /api/v1/models (short-TTL cached)."""
+    return _probe_lmstudio_models(url) is not None
+
+
 def _host_match(url: str, *domains: str) -> bool:
     """Return True if url's hostname equals any of `domains` or is a subdomain of one.
 
@@ -646,7 +716,7 @@ async def httpx_post_kimi_aware_async(client, url: str, headers: Optional[Dict],
     return last
 
 
-def _detect_provider(url: str) -> str:
+def _detect_provider(url: str, *, probe: bool = False) -> str:
     """Detect the API provider from a configured endpoint URL.
 
     Matches on hostname (exact or subdomain) rather than substring, so a URL
@@ -654,6 +724,13 @@ def _detect_provider(url: str) -> str:
     look-alike host such as ``anthropic.com.example`` — is not misclassified.
     Unknown hosts fall back to the OpenAI-compatible default, which the
     majority of providers implement.
+
+    LM Studio cannot be identified by hostname (it runs on arbitrary local
+    ports), so confirming it requires a live probe of its native API. That
+    probe is gated behind ``probe=True`` because most callers (header building,
+    reachability checks, model listing) treat LM Studio identically to any
+    OpenAI-compatible endpoint and must stay free of network side effects.
+    Only callers that branch on the ``lmstudio`` value opt in.
     """
     if _is_ollama_native_url(url):
         return "ollama"
@@ -671,6 +748,12 @@ def _detect_provider(url: str) -> str:
         return "nvidia"
     if _host_match(url, "moonshot.ai") or _host_match(url, "moonshot.cn"):
         return "moonshot"
+    if probe:
+        try:
+            if _is_local_host(urlparse(url).hostname) and _fingerprint_is_lmstudio(url):
+                return "lmstudio"
+        except Exception:
+            pass
     from src.chatgpt_subscription import is_chatgpt_subscription_base
     if is_chatgpt_subscription_base(url):
         return "chatgpt-subscription"
@@ -776,6 +859,8 @@ def _provider_label(url: str) -> str:
         except Exception:
             pass
     if _is_ollama_native_url(url): return "Ollama"
+    if _detect_provider(url, probe=True) == "lmstudio":
+        return "LM Studio"
     try:
         _parsed_local = urlparse(url)
         host = (_parsed_local.hostname or "").lower()
@@ -1659,7 +1744,7 @@ async def llm_call_async(
     session_id: Optional[str] = None,
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
-    provider = _detect_provider(url)
+    provider = await asyncio.to_thread(_detect_provider, url)
     messages_copy = _sanitize_llm_messages(messages)
 
     # Consolidate multiple system messages into one at the start.
@@ -1825,7 +1910,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
       - event: error                       — errors
       - data: [DONE]                       — end of stream
     """
-    provider = _detect_provider(url)
+    provider = await asyncio.to_thread(_detect_provider, url, probe=True)
     messages_copy = _sanitize_llm_messages(messages)
 
     # Consolidate multiple system messages into one at the start.
@@ -1869,7 +1954,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         }
         if _omit_temperature(provider, model):
             payload.pop("temperature", None)
-        if provider not in {"openrouter", "groq"}:
+        if provider not in {"openrouter", "groq", "lmstudio"}:
             payload["stream_options"] = {"include_usage": True}
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"

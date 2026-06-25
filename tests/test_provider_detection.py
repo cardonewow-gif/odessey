@@ -107,6 +107,8 @@ class TestBuildersRejectLookalikeHosts:
         assert build_chat_url("https://notanthropic.com") == "https://notanthropic.com/chat/completions"
 
     def test_lookalike_anthropic_models_is_openai(self):
+        # Must hit the generic OpenAI branch, not Anthropic. Non-local
+        # lookalike hosts stay generic and do not get a /v1 segment invented.
         assert llm_core._detect_provider("https://anthropic.com.evil.com") == "openai"
         assert build_models_url("https://anthropic.com.evil.com") == "https://anthropic.com.evil.com/models"
 
@@ -120,6 +122,8 @@ class TestBuildersRejectLookalikeHosts:
         assert build_chat_url("https://notollama.com") == "https://notollama.com/chat/completions"
 
     def test_lookalike_ollama_models_is_openai(self):
+        # Must hit the generic OpenAI branch, not Ollama. Non-local lookalike
+        # hosts stay generic and do not get a /v1 segment invented.
         assert llm_core._detect_provider("https://notollama.com") == "openai"
         assert build_models_url("https://notollama.com") == "https://notollama.com/models"
 
