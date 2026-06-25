@@ -453,7 +453,7 @@ app.mount("/static", _RevalidatingStatic(directory=STATIC_DIR), name="static")
 
 # ========= GENERATED IMAGES =========
 @app.get("/api/generated-image/{filename}")
-async def serve_generated_image(filename: str, request: Request):
+async def serve_generated_image(filename: str, request: Request, thumb: int = 0):
     """Serve generated images from the data directory."""
     img_path = resolve_generated_image_path(filename)
     # SECURITY: filename is the only key, so anyone who knows / guesses a
@@ -484,6 +484,33 @@ async def serve_generated_image(filename: str, request: Request):
         "mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm",
         "mkv": "video/x-matroska", "m4v": "video/mp4",
     }.get(ext, "application/octet-stream")
+    # Grid tiles request ?thumb=1 — serve a small cached WebP instead of the
+    # multi-MB original so the gallery scrolls fast with many images. Filenames
+    # are content hashes, so a thumbnail for a given filename never changes →
+    # generate once, cache it next to the originals, and reuse the immutable
+    # headers. Videos fall through to the original (the grid renders them via
+    # <video>); generation failures also fall through to the full image.
+    if thumb and mime.startswith("image/"):
+        try:
+            from PIL import Image, ImageOps
+            from src.generated_images import GENERATED_IMAGE_DIR
+            thumb_dir = GENERATED_IMAGE_DIR / ".thumbs"
+            thumb_dir.mkdir(parents=True, exist_ok=True)
+            thumb_path = thumb_dir / (filename + ".webp")
+            if not thumb_path.exists():
+                im = Image.open(str(img_path))
+                # Bake EXIF rotation into the pixels (PIL drops EXIF on save).
+                im = ImageOps.exif_transpose(im)
+                im.thumbnail((400, 400))
+                if im.mode not in ("RGB", "RGBA", "L"):
+                    im = im.convert("RGB")
+                im.save(str(thumb_path), "WEBP", quality=80)
+            return FileResponse(
+                str(thumb_path), media_type="image/webp", headers=GENERATED_IMAGE_HEADERS,
+            )
+        except Exception as _te:
+            logger.warning("Gallery thumbnail generation failed for %r: %s", filename, _te)
+            # Fall through to the full image.
     # Generated-image filenames are content hashes → the bytes for a given
     # filename never change. Cache them hard so the gallery doesn't
     # re-download every full-size image each time it's opened. `immutable`

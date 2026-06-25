@@ -98,6 +98,8 @@ def _image_to_dict(img: GalleryImage, session_name: str = None) -> Dict[str, Any
         "id": img.id,
         "filename": img.filename,
         "url": f"/api/generated-image/{img.filename}",
+        # Small cached WebP for grid tiles; full `url` is used in the detail view.
+        "thumb_url": f"/api/generated-image/{img.filename}?thumb=1",
         "prompt": img.prompt,
         "model": img.model,
         "size": img.size,

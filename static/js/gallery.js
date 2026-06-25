@@ -1218,7 +1218,7 @@ function _renderGrid() {
              <span class="gallery-card-play" aria-hidden="true">
                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
              </span>`
-          : `<img src="${_esc(img.url)}" alt="${_esc(img.prompt)}" loading="lazy" />`}
+          : `<img src="${_esc(img.thumb_url || img.url)}" alt="${_esc(img.prompt)}" loading="lazy" decoding="async" />`}
         <div class="gallery-card-info">
           <div class="gallery-card-prompt">${_esc(promptPreview)}</div>
           <div class="gallery-card-meta">
