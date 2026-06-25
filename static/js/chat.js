@@ -22,7 +22,7 @@ import codeRunnerModule from './codeRunner.js';
 import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handleSetupInput, handleSetupWizard, typewriterInto } from './slashCommands.js';
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
-import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composerArrowUpRecall.js';
+import { wireArrowUpRecall,getUserMessagesFromChatHistory } from './composerArrowUpRecall.js';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
@@ -191,7 +191,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
     // ArrowUp on empty composer recalls last user message (like many chat apps).
     const _wireArrowUpRecall = (composer) =>
-      wireArrowUpRecall(composer, () => getLastUserMessageFromChatHistory(), {
+      wireArrowUpRecall(composer, () => getUserMessagesFromChatHistory(document), {
         autoResize: uiModule?.autoResize,
       });
 
