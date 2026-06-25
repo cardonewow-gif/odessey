@@ -40,7 +40,7 @@ Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration
 
 ## Features
 
-- **Chat + Agents** — local/API models, tools, MCP, files, shell, skills, and memory.
+- **Chat + Agents** — local/API models, tools, MCP, files, shell, skills, memory, and NEAR AI (TEE cloud).
 - **Cookbook** — hardware-aware model recommendations, downloads, and serving.
 - **Deep Research** — multi-step web research with source reading and report generation.
 - **Compare** — blind side-by-side model testing and synthesis.
