@@ -591,6 +591,33 @@ def _is_discovery_only_provider(provider: str) -> bool:
     return provider == "chatgpt-subscription"
 
 
+def _is_remote_endpoint(base_url: str) -> bool:
+    """True for cloud/API endpoints (non-local hosts).
+
+    Per-model chat-completion probes are only useful for local servers
+    where you need to verify each model actually loads into memory.
+    For remote cloud endpoints (OpenRouter, Anthropic, etc.) the
+    /v1/models response already confirms the endpoint is reachable,
+    and probing every model triggers avoidable API costs (issue #4843).
+    """
+    try:
+        host = urlparse(base_url).hostname or ""
+    except Exception:
+        return False
+    if host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        return not (ip.is_loopback or ip.is_private)
+    except ValueError:
+        pass  # not an IP literal -- treat as a remote hostname
+    # A bare hostname can't be statically classified as Tailscale/mDNS
+    # without a DNS lookup; treat any non-IP hostname as remote. Its
+    # reachability was already confirmed by /v1/models, so skipping the
+    # per-model chat probe is the safe (non-billing) call.
+    return True
+
+
 def _resolve_probe_key(ep) -> Optional[str]:
     """API key/bearer to probe an endpoint with."""
     try:
@@ -1584,15 +1611,25 @@ def setup_model_routes(model_discovery):
                 skipped = len(all_models) - len(models)
                 yield f"data: {json.dumps({'type': 'probe_start', 'endpoint': ep['name'], 'model_count': len(models), 'skipped': skipped})}\n\n"
 
+                # Skip per-model chat-completion probes for remote/cloud
+                # endpoints -- /v1/models already confirmed reachability.
+                # Probing every model on OpenRouter etc. triggers hundreds
+                # of /chat/completions requests and avoidable costs (#4843).
+                _probe_chat = not _is_remote_endpoint(base)
+
                 for model_id in models:
                     total += 1
-                    result = _probe_single_model(base, ep.get("api_key"), model_id, timeout=8)
-                    result["type"] = "probe_result"
-                    result["endpoint"] = ep["name"]
-                    result["model"] = model_id
-                    if result["status"] == "ok":
+                    if _probe_chat:
+                        result = _probe_single_model(base, ep.get("api_key"), model_id, timeout=8)
+                        result["type"] = "probe_result"
+                        result["endpoint"] = ep["name"]
+                        result["model"] = model_id
+                        if result["status"] == "ok":
+                            ok_count += 1
+                        yield f"data: {json.dumps(result)}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'type': 'probe_result', 'status': 'ok', 'latency_ms': 0, 'skipped': True, 'endpoint': ep['name'], 'model': model_id})}\n\n"
                         ok_count += 1
-                    yield f"data: {json.dumps(result)}\n\n"
 
             yield f"data: {json.dumps({'type': 'probe_done', 'total': total, 'ok': ok_count})}\n\n"
 
