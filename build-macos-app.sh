@@ -27,22 +27,13 @@ echo "  port:        $PORT"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-# ── Icon (best effort) — center-crop docs/odysseus.jpg to a square .icns ──
-if [ -f "$REPO_DIR/docs/odysseus.jpg" ] && command -v sips >/dev/null 2>&1; then
-  TMPIMG="$(mktemp -d)"
-  # Center-crop to a square, scale to 512 (sips' icns encoder caps at 512), and
-  # let sips emit the .icns directly — more robust across macOS versions than
-  # building an .iconset by hand.
-  sips -c 720 720 "$REPO_DIR/docs/odysseus.jpg" --out "$TMPIMG/sq.png" >/dev/null 2>&1 || cp "$REPO_DIR/docs/odysseus.jpg" "$TMPIMG/sq.png"
-  sips -z 512 512 "$TMPIMG/sq.png" --out "$TMPIMG/icon.png" >/dev/null 2>&1
-  if sips -s format icns "$TMPIMG/icon.png" --out "$APP/Contents/Resources/odysseus.icns" >/dev/null 2>&1; then
-    echo "  icon:        odysseus.icns"
-  else
-    echo "  icon:        (skipped — conversion failed)"
-  fi
-  rm -rf "$TMPIMG"
-else
-  echo "  icon:        (skipped — no docs/odysseus.jpg)"
+# ── Icon (simply skips if icon generation fails)
+if [ ! -x "$REPO_DIR/scripts/build-icons.sh" ]; then
+  echo "  icon:        (skipped — missing scripts/build-icons.sh)"
+fi
+if [ -x "$REPO_DIR/scripts/build-icons.sh" ] && "$REPO_DIR/scripts/build-icons.sh" macos; then
+  cp "$REPO_DIR/dist/icons/odysseus.icns" "$APP/Contents/Resources/odysseus.icns"
+  echo "  icon:        assets/app-icon.svg"
 fi
 
 # ── Info.plist ──

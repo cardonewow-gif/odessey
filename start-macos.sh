@@ -88,15 +88,17 @@ done
 #    - tmux      : Cookbook runs model downloads/serves in the background
 #    - llama.cpp : a prebuilt, Metal-enabled llama-server so Cookbook can serve
 #                  GGUF models on the GPU with no compile step
+#    - librsvg   : renders the SVG app icon when building Odysseus.app
 #    - python@3.11 : installed only if no suitable (arm64) Python was found above
 #
 # tmux and llama.cpp are needed only by Cookbook (local model serving), not to
-# boot the core app. So if Homebrew can't install one right now we warn and keep
-# going instead of aborting the whole launch. Python is required to build the
-# venv, so that one stays fatal (handled by the PY check just below).
+# boot the core app. librsvg is needed only when building the app icon. So if
+# Homebrew can't install one right now we warn and keep going instead of
+# aborting the whole launch. Python is required to build the venv, so that one
+# stays fatal (handled by the PY check just below).
 
 # Install a Homebrew formula only if its command isn't already present. A failed
-# install warns but does not abort — Cookbook can be set up later.
+# install warns but does not abort — Cookbook or app-icon builds can be set up later.
 brew_ensure() {
     if command -v "$1" >/dev/null 2>&1; then
         echo "  ✓ $2 already installed"
@@ -119,6 +121,7 @@ else
 fi
 brew_ensure tmux tmux
 brew_ensure llama-server llama.cpp
+brew_ensure rsvg-convert librsvg
 brew_ensure apfel apfel
 
 if [ -z "$PY" ] || [ ! -x "$PY" ]; then
