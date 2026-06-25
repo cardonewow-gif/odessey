@@ -12,6 +12,25 @@ from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_mess
 
 logger = logging.getLogger(__name__)
 
+def _clean_search_query(message: str, max_len: int = 200) -> str:
+    """Strip markdown fences, code blocks, and formatting artifacts from a
+    user message to produce a clean web-search query.
+
+    When chat-mode web search is enabled the raw user prompt is passed
+    directly as the search query.  Pasted prompts containing fenced code
+    blocks, inline backticks, and blank lines leak into the query string
+    and produce poor results (issue #4547).  This helper strips those
+    artifacts and truncates to *max_len* characters.
+    """
+    text = re.sub(r"```\n[\s\S]*?\n```", "", message)
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    text = re.sub(r"`[^`]+`", "", text)
+    text = re.sub(r"\n{2,}", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_len]
+
+
+
 # ── Stopwords & tokenizer ──
 
 _STOPWORDS = frozenset(
@@ -281,7 +300,7 @@ class ChatProcessor:
         if use_web:
             try:
                 web_context, web_sources = comprehensive_web_search(
-                    message, time_filter=time_filter, return_sources=True
+                    _clean_search_query(message), time_filter=time_filter, return_sources=True
                 )
                 preface.append(untrusted_context_message("web search results", web_context))
             except Exception as e:
