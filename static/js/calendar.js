@@ -2523,6 +2523,13 @@ async function _showCalSettings() {
   `;
   document.body.appendChild(overlay);
 
+  // Make Calendar Settings panel draggable using the shared window-drag helper
+  const _content = overlay.querySelector('.modal-content');
+  const _header = overlay.querySelector('.modal-header');
+  if (_content && _header) {
+    makeWindowDraggable(overlay, { content: _content, header: _header });
+  }
+
   const cleanup = () => overlay.remove();
   overlay.querySelector('#cal-settings-close').addEventListener('click', cleanup);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
