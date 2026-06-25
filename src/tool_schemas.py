@@ -1191,6 +1191,28 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "recall_archived_memory",
+            "description": (
+                "Search the cold storage archive (memory glacier) for past events, "
+                "preferences, or facts that are no longer in your immediate hot memory. "
+                "Use this tool when the user asks about something you vaguely remember "
+                "or explicitly asks you to 'think back' or 'check your archives'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search terms to look for in the archived memory."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "manage_bg_jobs",
             "description": "Inspect and control detached background `bash` jobs (started with the `#!bg` marker). action='list' shows this chat's jobs with id/status/age/command; action='output' returns a job's captured output so far (use for a still-running job, or to re-read a finished one); action='kill' terminates a runaway job's process tree instead of waiting out its max-runtime. output and kill need job_id from list.",
             "parameters": {
@@ -1358,6 +1380,9 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
                 content += "\n" + args["category"]
         else:
             content = action
+    elif tool_type == "recall_archived_memory":
+        # Single free-text query; dispatch reads it as the whole content body.
+        content = args.get("query", "")
     elif tool_type == "list_models":
         content = args.get("filter", "")
     elif tool_type == "ui_control":

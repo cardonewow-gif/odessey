@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import time
+import threading
 import uuid
 import re
 from typing import List, Dict, Tuple
@@ -18,25 +19,26 @@ def get_text_similarity(text1: str, text2: str) -> float:
     """Calculate Jaccard similarity between two texts."""
     if not text1 or not text2:
         return 0.0
-    
+
     tokens1 = set(tokenize(text1.lower()))
     tokens2 = set(tokenize(text2.lower()))
-    
+
     if not tokens1 and not tokens2:
         return 1.0
     if not tokens1 or not tokens2:
         return 0.0
-        
+
     intersection = tokens1.intersection(tokens2)
     union = tokens1.union(tokens2)
-    
+
     return len(intersection) / len(union)
 
 class MemoryManager:
     def __init__(self, data_dir: str):
         self.memory_file = os.path.join(data_dir, "memory.json")
         self.ensure_file_exists()
-        
+        self.lock = threading.RLock()
+
     def extract_memory_from_chat(self, chat_history: List[Dict], session_id: str = None) -> List[Dict]:
         """
         Extract memory entries from chat history as a fallback when LLM fails.
@@ -49,14 +51,14 @@ class MemoryManager:
             List of memory entries with text, timestamp, and optional session_id
         """
         memories = []
-        
+
         for msg in chat_history:
             if not isinstance(msg, dict):
                 continue
             if msg.get("role") == "assistant":
                 content = str(msg.get("content", ""))
                 lines = content.split('\n')
-                
+
                 for line in lines:
                     line = line.strip()
                     # Look for bullet points or numbered lists that might contain memories
@@ -81,9 +83,9 @@ class MemoryManager:
                     # If we see a clear separator or end
                     elif re.match(r'^={3,}|-{3,}|_{3,}', line):
                         pass
-                        
+
         return memories
-        
+
     def process_inline_memory_command(self, message: str) -> Tuple[bool, str]:
         """
         Check if a message is an inline memory command (e.g. "remember: X").
@@ -98,18 +100,59 @@ class MemoryManager:
         # Pattern for memory commands: "remember: X", "memorize: X", "save: X", etc.
         pattern = r'^(?:remember|memorize|save|note|store)[:\-]?\s+(.+)$'
         match = re.match(pattern, message.strip(), re.IGNORECASE)
-        
+
         if match:
             return True, match.group(1).strip()
         else:
             return False, ""
-    
+
     def ensure_file_exists(self):
         """Create memory file if it doesn't exist."""
         if not os.path.exists(self.memory_file):
             with open(self.memory_file, 'w', encoding='utf-8') as f:
                 json.dump([], f, ensure_ascii=False, indent=2)
-    
+
+    def search_glacier(self, query: str, owner: str = None, limit: int = 5) -> List[Dict]:
+        """
+        Synchronously scan the cold storage JSONL for semantic matches.
+        This is an expensive O(N) disk read, meant to be used sparingly
+        when triggered by a heuristic 'nudge' or an explicit tool call.
+        """
+        glacier_path = os.path.join(os.path.dirname(self.memory_file), "memory_glacier.jsonl")
+        if not os.path.exists(glacier_path):
+            return []
+
+        query_tokens = set(tokenize(query.lower()))
+        if not query_tokens:
+            return []
+
+        results = []
+        try:
+            with open(glacier_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line: continue
+                    try:
+                        mem = json.loads(line)
+                        if owner and mem.get("owner") != owner:
+                            continue
+
+                        mem_text = mem.get("text", "").lower()
+                        mem_tokens = set(tokenize(mem_text))
+                        if not mem_tokens: continue
+
+                        score = len(query_tokens & mem_tokens) / len(query_tokens | mem_tokens)
+                        if score > 0.08:  # Faint semantic match threshold
+                            results.append((score, mem))
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as e:
+            logger.error("Failed to read glacier: %s", e)
+
+        results.sort(key=lambda x: x[0], reverse=True)
+        return [m for _, m in results[:limit]]
+
+
     def load_all(self) -> List[Dict]:
         """Load all memory entries from JSON file (unfiltered)."""
         if not os.path.exists(self.memory_file):
@@ -123,6 +166,15 @@ class MemoryManager:
         except (json.JSONDecodeError, PermissionError) as e:
             logger.error("Error loading memory.json: %s", e)
             return self._migrate_from_legacy()
+
+        with self.lock:
+            if not os.path.exists(self.memory_file):
+                return []
+            try:
+                with open(self.memory_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                return []
 
         return []
 
@@ -146,7 +198,7 @@ class MemoryManager:
         if changed:
             self.save(entries)
             logger.info("Claimed %d ownerless memories for %s", claimed, owner)
-    
+
     def _validate_entries(self, entries: List[Dict]) -> List[Dict]:
         """Ensure all entries have required fields."""
         validated = []
@@ -165,18 +217,18 @@ class MemoryManager:
                 entry["uses"] = 0
             validated.append(entry)
         return validated
-    
+
     def _migrate_from_legacy(self) -> List[Dict]:
         """Migrate from old text format to JSON if needed."""
         legacy_path = os.path.join(os.path.dirname(self.memory_file), "memory.txt")
         if not os.path.exists(legacy_path):
             return []
-            
+
         logger.info("Converting legacy memory.txt to new JSON format")
         try:
             with open(legacy_path, "r", encoding="utf-8") as f:
                 lines = [ln.strip() for ln in f.readlines() if ln.strip()]
-            
+
             entries = []
             for line in lines:
                 entries.append({
@@ -186,13 +238,13 @@ class MemoryManager:
                     "source": "user",
                     "category": "fact"
                 })
-            
+
             self.save(entries)
             return entries
         except Exception as e:
             logger.error("Failed to convert legacy memory: %s", e)
             return []
-    
+ 
     def save(self, entries: List[Dict]):
         """Save memory entries to JSON file."""
         # Validate entries before saving
@@ -205,13 +257,20 @@ class MemoryManager:
                 entry["source"] = "user"
             if "category" not in entry:
                 entry["category"] = "fact"
-        
+ 
         # Use atomic write
         tmp_file = self.memory_file + ".tmp"
         with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(entries, f, ensure_ascii=False, indent=2)
         os.replace(tmp_file, self.memory_file)
-    
+
+        with self.lock:
+            # Write to a temporary file first, then atomically rename
+            temp_file = f"{self.memory_file}.tmp"
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(entries, f, indent=2)
+            os.replace(temp_file, self.memory_file)
+
     def add_entry(self, text: str, source: str = "user", category: str = "fact", owner: str = None) -> Dict:
         """Add a new memory entry."""
         if not text.strip():

@@ -16,6 +16,7 @@ import logging
 import os
 import re
 from typing import Optional
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,12 @@ AUDIT_SYSTEM_PROMPT = (
 AUDIT_INTERVAL = 5  # audit every N new memories added
 _extractions_since_audit = 0
 
+GLACIER_INTERVAL = 50  # prune least used items to prevent state/heap creep
+_extractions_since_glacier = 0
+_glacier_lock = asyncio.Lock()
+
+# Hard references to prevent GC of background tasks
+_glacier_tasks = set()
 
 def _message_text(message) -> str:
     content = getattr(message, "content", None)
@@ -477,6 +484,29 @@ async def extract_and_store(
                 await audit_memories(
                     memory_manager, memory_vector, endpoint_url, model, headers, owner=_owner
                 )
+
+            # offload to cold memory asynchronously without blocking the event loop
+            global _extractions_since_glacier
+            async with _glacier_lock:
+                _extractions_since_glacier += added
+                if _extractions_since_glacier >= GLACIER_INTERVAL:
+                    _extractions_since_glacier = 0
+                    logger.info("Glacier threshold reached, dispatching async offload task")
+
+                    try:
+                        from services.memory.service import MemoryService
+
+                        # decouple: inject the specific directory used by this invocation
+                        data_dir = os.path.dirname(memory_manager.memory_file)
+                        svc = MemoryService(data_dir=data_dir)
+
+                        # retain a strong reference so the gc doesnt kill task during io
+                        task = asyncio.create_task(asyncio.to_thread(svc.archive_cold_to_glacier))
+                        _glacier_tasks.add(task)
+                        task.add_done_callback(_glacier_tasks.discard)
+                    except Exception as e:
+                        logger.error(f"Failed to dispatch Glacier offload task: {e}", exc_info=True)
+
         else:
             logger.info("Auto memory extraction ran: 0 added")
 
