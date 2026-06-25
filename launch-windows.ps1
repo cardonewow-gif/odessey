@@ -140,7 +140,34 @@ Write-Step "Running first-time setup"
 & $venvPy setup.py
 if ($LASTEXITCODE -ne 0) { Fail "setup.py failed." }
 
-# 5. Friendly note about Git Bash (full Cookbook / agent-shell parity)
+# 5. Native Windows ChromaDB Process Isolation & Socket Validation
+Write-Step "Starting isolated ChromaDB background service"
+$chromaExe = Join-Path $PSScriptRoot "venv\Scripts\chroma.exe"
+if (-not (Test-Path $chromaExe)) {
+    Fail "chroma.exe not found in venv. Ensure dependencies installed correctly."
+}
+
+# Spin up the database silently in the background
+$chromaProcess = Start-Process -FilePath $chromaExe -ArgumentList "run", "--port", "8100", "--host", "127.0.0.1" -WindowStyle Minimized -PassThru
+
+Write-Host "Waiting for ChromaDB to bind to Port 8100..."
+$chromaReady = $false
+for ($i = 0; $i -lt 30; $i++) {
+    $conn = Get-NetTCPConnection -LocalPort 8100 -ErrorAction SilentlyContinue
+    if ($conn -and $conn.State -match 'Listen|Established') {
+        $chromaReady = $true
+        break
+    }
+    Start-Sleep -Seconds 1
+}
+
+if (-not $chromaReady) {
+    Stop-Process -Id $chromaProcess.Id -Force -ErrorAction SilentlyContinue
+    Fail "ChromaDB failed to initialize on Port 8100."
+}
+Write-Host "ChromaDB socket active." -ForegroundColor Green
+
+# 6. Friendly note about Git Bash
 if (-not (Find-GitBash)) {
     Write-Host ""
     Write-Host "NOTE: Git Bash (bash.exe) was not found on PATH." -ForegroundColor Yellow
@@ -162,8 +189,16 @@ if (Test-Path $cudaBase) {
     }
 }
 
-# 7. Start the server (use `python -m uvicorn` - bare `uvicorn` may not be on PATH)
+# 7. Start the server safely wrapped in a lifecycle trap
 Write-Step ("Starting Odysseus at http://{0}:{1}" -f $BindHost, $Port)
 Write-Host "Press Ctrl+C to stop."
 Write-Host ""
-& $venvPy -m uvicorn app:app --host $BindHost --port $Port
+
+try {
+    & $venvPy -m uvicorn app:app --host $BindHost --port $Port
+} finally {
+    Write-Host "`nCleaning up background database sockets..." -ForegroundColor Cyan
+    if ($chromaProcess) {
+        Stop-Process -Id $chromaProcess.Id -Force -ErrorAction SilentlyContinue
+    }
+}
